@@ -1,0 +1,2 @@
+light: python main.py light
+deep: python main.py deep
