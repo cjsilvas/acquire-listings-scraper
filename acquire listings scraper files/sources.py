@@ -505,16 +505,23 @@ def scrape_atb() -> List[Dict]:
 # BusinessesForSale US   marketplace, loses every dedupe tie to an origin broker
 # ----------------------------------------------------------------------
 
+# Site pages that match the detail URL shape but are not listings.
+BFS_NOT_LISTINGS = ("emailalerts", "contact", "advice", "sell-your-business",
+                    "brokers", "franchises", "login", "register")
+
 def scrape_bfs(max_pages: int = 6) -> List[Dict]:
     urls = set()
     for p in range(1, max_pages + 1):
+        # Pagination on this site is a suffix: ...for-sale, ...for-sale-2, ...for-sale-3
         idx = ("https://us.businessesforsale.com/us/search/accountancy-practices-for-sale"
-               + ("" if p == 1 else f"/page-{p}"))
+               + ("" if p == 1 else f"-{p}"))
         page = fetch(idx)
         if not page:
             break
         found = set(re.findall(
             r'href="(https://us\.businessesforsale\.com/us/[a-z0-9-]+\.aspx)"', page))
+        found = {u for u in found
+                 if not any(bad in u.lower() for bad in BFS_NOT_LISTINGS)}
         if not found:
             break
         urls |= found
@@ -543,7 +550,7 @@ def scrape_bfs(max_pages: int = 6) -> List[Dict]:
             except (AttributeError, ValueError):
                 return None
 
-        out.append(_base(
+        item = _base(
             "businessesforsale", "BusinessesForSale", url,
             firm_type=clean_title(title),
             state=state_deep(title, text[:1500]),
@@ -553,7 +560,12 @@ def scrape_bfs(max_pages: int = 6) -> List[Dict]:
             description=best_description(text),
             services=services_from(title + " " + text[:600]),
             status=status,
-        ))
+        )
+        # A real listing carries at least one financial figure or a state.
+        if not (item.get("state") or item.get("revenue") or item.get("asking_price")):
+            log.info("bfs: skipping non listing page %s", url)
+            continue
+        out.append(item)
     log.info("bfs: %s listings", len(out))
     return out
 
