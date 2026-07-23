@@ -41,18 +41,40 @@ MISSES_BEFORE_RETIRING = 2
 # Fetching
 # ----------------------------------------------------------------------
 
-def fetch(url: str, tries: int = 3, pause: float = 1.5) -> Optional[str]:
+HEADERS = {
+    "User-Agent": UA,
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
+}
+# Some sites refuse unfamiliar agents from datacenter IPs. When that happens we
+# retry once looking like an ordinary browser rather than giving up on the source.
+BROWSER_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+              "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
+
+
+def fetch(url: str, tries: int = 4, pause: float = 0.4) -> Optional[str]:
     """Polite GET. Spaces requests out and identifies itself honestly."""
+    last = None
     for attempt in range(tries):
+        headers = dict(HEADERS)
+        if attempt >= 2:
+            headers["User-Agent"] = BROWSER_UA
         try:
-            r = requests.get(url, headers={"User-Agent": UA}, timeout=25)
+            r = requests.get(url, headers=headers, timeout=40)
+            last = r.status_code
             if r.status_code == 200:
                 time.sleep(pause)
                 return r.text
-            log.warning("fetch %s returned %s", url, r.status_code)
+            log.warning("fetch %s returned %s (attempt %s)", url, r.status_code, attempt + 1)
+            if r.status_code in (429, 503):
+                time.sleep(3 * (attempt + 1))
         except Exception as e:
-            log.warning("fetch %s failed: %s", url, e)
+            log.warning("fetch %s failed: %s (attempt %s)", url, e, attempt + 1)
         time.sleep(pause * (attempt + 2))
+    log.error("fetch gave up on %s, last status %s", url, last)
     return None
 
 

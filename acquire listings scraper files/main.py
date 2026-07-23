@@ -37,15 +37,34 @@ def run(mode: str = "deep"):
         except Exception as e:
             log.exception("source %s failed, skipping it: %s", name, e)
 
-    from engine import deduplicate
-    scraped = deduplicate(scraped)
+    failed = [n for n in ALL_SOURCES if n not in ran]
+    if failed:
+        log.error("sources that failed this run: %s", failed)
+    if not ran:
+        log.error("every source failed. Nothing to sync.")
+        return {"ok": False, "reason": "all sources failed"}
 
-    stats = sync(scraped, ran, first_ever_run=legacy)
+    try:
+        from engine import deduplicate
+        scraped = deduplicate(scraped)
+        stats = sync(scraped, ran, first_ever_run=legacy)
+    except Exception as e:
+        # A failure here must not look like a healthy exit, but it also must not
+        # take the container down. The next run will try again on fresh data.
+        log.exception("sync failed after scraping %s listings: %s", len(scraped), e)
+        return {"ok": False, "reason": "sync failed", "sources_ok": ran}
+
     log.info("run finished in %.1fs mode=%s %s", time.time() - started, mode, stats)
-    if stats["skipped_sources"]:
+    if stats.get("skipped_sources"):
         log.error("ATTENTION: sources discarded this run: %s", stats["skipped_sources"])
+    stats["ok"] = True
+    stats["sources_ok"] = ran
+    stats["sources_failed"] = failed
     return stats
 
 
 if __name__ == "__main__":
-    run(sys.argv[1] if len(sys.argv) > 1 else "deep")
+    result = run(sys.argv[1] if len(sys.argv) > 1 else "deep")
+    # Exit clean whenever any real work happened. Railway should only flag a run
+    # as crashed when the scraper genuinely accomplished nothing.
+    sys.exit(0 if result.get("ok") else 1)
