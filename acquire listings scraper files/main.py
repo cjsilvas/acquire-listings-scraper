@@ -65,6 +65,30 @@ def run(mode: str = "deep"):
     except Exception as e:
         log.exception("enrichment failed, listings are still synced: %s", e)
 
+    # Quality gate. The site only advances its "listings last updated"
+    # stamp when a run passes every check here.
+    try:
+        checks = {}
+        checks["enough_sources"] = len(ran) >= 5
+        checks["no_source_collapse"] = not stats.get("skipped_sources")
+        res = db.table("listings").select("id", count="exact") \
+                .in_("status", ["active", "pending"]).execute()
+        live = res.count or 0
+        checks["live_count_sane"] = 250 <= live <= 900
+        checks["work_happened"] = (stats.get("new", 0) + stats.get("updated", 0)) > 0
+        gate_ok = all(checks.values())
+        db.table("sync_health").insert({
+            "ok": gate_ok,
+            "sources_ok": len(ran),
+            "sources_failed": len(failed),
+            "live_count": live,
+            "details": {"checks": checks, "failed_sources": failed},
+        }).execute()
+        if not gate_ok:
+            log.error("QUALITY GATE FAILED: %s", checks)
+    except Exception as e:
+        log.exception("could not record sync health: %s", e)
+
     stats["ok"] = True
     stats["sources_ok"] = ran
     stats["sources_failed"] = failed

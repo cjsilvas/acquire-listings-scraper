@@ -113,14 +113,16 @@ def enrich_aps() -> int:
     tmap = aps_territory_map()
     res = (db.table("listings")
              .select("fingerprint,state")
-             .eq("source", "aps").is_("agent_name", "null")
+             .eq("source", "aps").is_("agent_name", "null").is_("agent_team", "null")
              .execute())
     updated = 0
     for row in (res.data or []):
-        team = tmap.get((row.get("state") or "").upper())
-        if not team:
+        who = tmap.get((row.get("state") or "").upper())
+        if not who:
             continue
-        db.table("listings").update({"agent_name": team}) \
+        is_team = bool(re.search(r"\b(team|group)\b|\band\b", who, re.I))
+        field = "agent_team" if is_team else "agent_name"
+        db.table("listings").update({field: who}) \
           .eq("fingerprint", row["fingerprint"]).execute()
         updated += 1
     log.info("enrich aps: stamped %s listings with territory teams", updated)

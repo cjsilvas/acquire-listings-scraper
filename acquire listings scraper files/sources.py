@@ -562,8 +562,14 @@ def scrape_bfs(max_pages: int = 6) -> List[Dict]:
             except (AttributeError, ValueError):
                 return None
 
+        listed_by = None
+        m = re.search(r"Listed by:?\s*([A-Z][A-Za-z0-9 .,&'()/-]{2,60}?)\s*(?:\.|Listing ID|Seller ref|Asking|Sales Revenue|$)", text)
+        if m:
+            listed_by = m.group(1).strip(" .,")
+
         item = _base(
             "businessesforsale", "BusinessesForSale", url,
+            listing_brokerage=listed_by,
             firm_type=clean_title(title),
             state=state_deep(title, text[:1500]),
             revenue=num("(?:gross )?revenue|turnover|sales"),

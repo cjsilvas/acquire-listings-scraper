@@ -245,6 +245,8 @@ def sync(scraped: List[Dict], sources_run: List[str], first_ever_run: bool) -> D
             "description": item.get("description"),
             "listing_type": item.get("listing_type"),
             "agent_name": item.get("agent_name"),
+            "agent_team": item.get("agent_team"),
+            "listing_brokerage": item.get("listing_brokerage"),
             "agent_email": item.get("agent_email"),
             "agent_phone": item.get("agent_phone"),
             "services": item.get("services") or [],
