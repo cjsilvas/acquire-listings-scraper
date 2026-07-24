@@ -348,7 +348,19 @@ def scrape_poe() -> List[Dict]:
             return html.unescape(m.group(1)).strip() if m else None
 
         ask = money(val("asking-price") or "")
-        status_raw = (val("status") or "for sale").lower()
+        # Status renders as a label/value spec row, with the value often inside a
+        # styled span: <p class="label">Status:</p> <p class="value"><span>SOLD</span></p>
+        status_raw = ""
+        m = re.search(r'>\s*Status:\s*</(?:p|td)>\s*<(?:p|td)[^>]*>(.*?)</(?:p|td)>',
+                      page, re.I | re.S)
+        if m:
+            status_raw = re.sub(r"<[^>]+>", " ", m.group(1)).strip().lower()
+        if not status_raw:
+            m = re.search(r"Status:\s*([A-Za-z ]{3,20}?)\s*(?:Designation|Listing|Asking|Location|$)",
+                          text, re.I)
+            status_raw = m.group(1).strip().lower() if m else ""
+        if not status_raw:
+            status_raw = (val("status") or "for sale").lower()
         status = ("sold" if "sold" in status_raw else
                   "pending" if "contract" in status_raw or "pending" in status_raw else
                   "active")
