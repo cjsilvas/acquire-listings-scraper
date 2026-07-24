@@ -38,6 +38,13 @@ def run(mode: str = "deep"):
             log.exception("source %s failed, skipping it: %s", name, e)
 
     failed = [n for n in ALL_SOURCES if n not in ran]
+    # A source that raised no error but produced nothing is failed, not collapsed.
+    # This keeps a chronically blocked source from tripping the quality gate.
+    empty = [n for n in ran if not any(i.get("source") == n for i in scraped)]
+    if empty:
+        log.error("sources that returned nothing this run: %s", empty)
+        failed = failed + empty
+        ran = [n for n in ran if n not in empty]
     if failed:
         log.error("sources that failed this run: %s", failed)
     if not ran:
