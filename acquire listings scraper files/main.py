@@ -57,6 +57,14 @@ def run(mode: str = "deep"):
     log.info("run finished in %.1fs mode=%s %s", time.time() - started, mode, stats)
     if stats.get("skipped_sources"):
         log.error("ATTENTION: sources discarded this run: %s", stats["skipped_sources"])
+
+    # Fill in agent names where brokers publish them. Never blocks the run.
+    try:
+        from enrich import run_enrichment
+        stats["enriched"] = run_enrichment()
+    except Exception as e:
+        log.exception("enrichment failed, listings are still synced: %s", e)
+
     stats["ok"] = True
     stats["sources_ok"] = ran
     stats["sources_failed"] = failed
