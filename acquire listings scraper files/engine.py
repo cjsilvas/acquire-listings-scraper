@@ -26,7 +26,7 @@ UA = "FoldListingsBot/1.0 (accounting practice aggregator; contact: cj@eagleeyee
 # Lower number wins during dedupe. Origin brokers beat marketplaces, always.
 SOURCE_PRIORITY = {
     "aba": 1, "naab": 1, "aps": 1, "poe": 1, "ppt": 1, "atb": 1,
-    "prohorizons": 1, "padgett": 1,
+    "prohorizons": 1, "padgett": 1, "abizbrokers": 1,
     "businessesforsale": 5,
 }
 

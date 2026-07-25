@@ -694,3 +694,91 @@ ALL_SOURCES.update({
     "prohorizons": scrape_prohorizons,
     "padgett": scrape_padgett,
 })
+
+
+# ----------------------------------------------------------------------
+# Accounting Biz Brokers   WordPress site. The listing custom post type
+# is exposed at /wp-json/wp/v2/listing, and each detail page carries the
+# authoritative status and state in its body class (status-sold,
+# status-sale-pending, state-tennessee), plus Annual Gross and Asking
+# Price in the page text. No rendering or proxy needed.
+# ----------------------------------------------------------------------
+
+ABB_STATUS = {
+    "status-sold": "sold",
+    "status-sale-pending": "pending",
+    "status-new": "active",
+    "status-publish": "active",
+}
+
+def scrape_abizbrokers() -> List[Dict]:
+    feed = fetch("https://accountingbizbrokers.com/wp-json/wp/v2/listing?per_page=100")
+    if not feed:
+        return []
+    try:
+        import json as _json
+        rows = _json.loads(feed)
+    except Exception:
+        log.error("abizbrokers: feed was not valid JSON")
+        return []
+
+    out = []
+    for r in rows:
+        url = r.get("link")
+        title = html.unescape((r.get("title") or {}).get("rendered", "")).strip()
+        if not url or not title:
+            continue
+        page = fetch(url)
+        if not page:
+            continue
+
+        # Body class holds the ground-truth status and state.
+        cls = re.search(r'post-\d+ listing type-listing ([^"]+)', page)
+        classes = cls.group(1).split() if cls else []
+        status = "active"
+        state = None
+        for c in classes:
+            if c in ABB_STATUS:
+                status = ABB_STATUS[c]
+            if c.startswith("state-"):
+                nm = c[len("state-"):].replace("-", " ")
+                if nm != "virtual":
+                    state = state_from(nm)
+
+        text = strip_tags(page)
+        m = re.search(r"Annual Gross\s*\$?([\d,]+)", text, re.I)
+        rev = int(m.group(1).replace(",", "")) if m else None
+        m = re.search(r"Asking Price\s*\$?([\d,]+)", text, re.I)
+        ask = int(m.group(1).replace(",", "")) if m else None
+
+        # Body text is prefixed by the nav menu; the real copy starts after
+        # the status word (NEW / SOLD / SALE PENDING / AVAILABLE) that follows
+        # the firm name, and ends at the inquiry form.
+        desc = None
+        body = re.split(r"View Listings Free Market Analysis", text, 1)
+        tail = body[-1]
+        m = re.search(r"\b(?:NEW|SOLD|SALE PENDING|AVAILABLE)\b(.{150,4000}?)"
+                      r"(?:I Want to Know More|First Name Last Name|Asking Price\b)",
+                      tail, re.S)
+        if m:
+            desc = re.sub(r"\s+", " ", m.group(1)).strip(" .-")
+
+        slug = url.rstrip("/").split("/")[-1]
+        out.append(_base(
+            "abizbrokers", "Accounting Biz Brokers", url,
+            firm_type=clean_title(title),
+            listing_code="ABB-" + slug[:40],
+            state=state or state_deep(title, text[:1500]),
+            revenue=rev,
+            asking_price=ask,
+            description=desc or best_description(text),
+            services=services_from(title + " " + text[:600]),
+            status=status,
+        ))
+    log.info("abizbrokers: %s listings", len(out))
+    return out
+
+
+ALL_SOURCES.update({
+    "abizbrokers": scrape_abizbrokers,
+})
