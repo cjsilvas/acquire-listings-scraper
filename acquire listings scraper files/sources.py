@@ -579,6 +579,10 @@ def scrape_bfs(max_pages: int = 6) -> List[Dict]:
             services=services_from(title + " " + text[:600]),
             status=status,
         )
+        # The marketplace names the actual listing firm: "Listed by X"
+        lb = re.search(r"Listed by:?\s+([A-Z][A-Za-z0-9&.,' -]{2,60}?)(?:\s{2,}|\.\s|$|Asking|Sales Revenue|Contact)", text)
+        if lb:
+            item["brokerage"] = lb.group(1).strip(" .,")
         # A real listing carries at least one financial figure or a state.
         if not (item.get("state") or item.get("revenue") or item.get("asking_price")):
             log.info("bfs: skipping non listing page %s", url)
@@ -592,4 +596,101 @@ ALL_SOURCES.update({
     "ppt": scrape_ppt,
     "atb": scrape_atb,
     "businessesforsale": scrape_bfs,
+})
+
+
+# ----------------------------------------------------------------------
+# ProHorizons   West coast broker. Status table right on the page,
+# including Sold, so this source publishes ground truth directly.
+# ----------------------------------------------------------------------
+
+PH_PAGES = [
+    "https://www.prohorizons.com/pacific/",       # California
+    "https://www.prohorizons.com/oregon/",
+    "https://www.prohorizons.com/washington/",
+]
+
+def scrape_prohorizons() -> List[Dict]:
+    out = []
+    for idx in PH_PAGES:
+        page = fetch(idx)
+        if not page:
+            continue
+        body = page[page.find("<tbody"):page.find("</table")]
+        for row in re.findall(r"<tr>(.*?)</tr>", body, re.S):
+            cells = re.findall(r"<td[^>]*>(.*?)</td>", row, re.S)
+            if len(cells) < 6:
+                continue
+            def cl(c):
+                return html.unescape(re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", c))).strip()
+            opp, city, county, state_name, status_raw, gross = [cl(c) for c in cells[:6]]
+            if not city or not state_name:
+                continue
+            link = re.search(r'href="([^"]+)"', cells[1])
+            url = link.group(1) if link else idx
+            st = state_from(state_name) or state_from(city)
+            sr = status_raw.lower()
+            status = ("sold" if "sold" in sr else
+                      "pending" if "pending" in sr else "active")
+            rev = money(gross)
+            code_id = "PH-" + re.sub(r"[^A-Z0-9]", "", (st or "XX") + city.upper()) + "-" + str(rev or 0)
+            out.append(_base(
+                "prohorizons", "ProHorizons", url,
+                firm_type=clean_title(f"{city}, {state_name} Accounting Practice"),
+                listing_code=code_id,
+                city=city,
+                state=st,
+                revenue=rev,
+                services=["Accounting", "Tax"],
+                status=status,
+            ))
+    log.info("prohorizons: %s listings", len(out))
+    return out
+
+
+# ----------------------------------------------------------------------
+# Padgett Advisors   franchise firm resales, detail page per listing
+# ----------------------------------------------------------------------
+
+def scrape_padgett() -> List[Dict]:
+    idx = fetch("https://www.padgettadvisors.com/join/firms-for-sale/")
+    if not idx:
+        return []
+    urls = sorted(set(re.findall(
+        r'href="(https://www\.padgettadvisors\.com/blog/portfolio/[^"#?]+)"', idx)))
+    out = []
+    for url in urls:
+        page = fetch(url)
+        if not page:
+            continue
+        text = strip_tags(page)
+        title = re.search(r"<title>([^<]*)", page)
+        title = title.group(1).split("|")[0].split(" - Padgett")[0] if title else ""
+        m = re.search(r"Annual Revenue:?\s*\$([\d,]+)", text)
+        rev = int(m.group(1).replace(",", "")) if m else None
+        desc = None
+        m = re.search(r"Firm Description:\s*(.{200,4000}?)(?:Inquire|Contact|Interested|Find an office|$)",
+                      text, re.S)
+        if m:
+            desc = m.group(1).strip()
+        low = text[:3000].lower()
+        status = ("sold" if re.search(r"\bsold\b", title.lower()) or "no longer available" in low
+                  else "pending" if re.search(r"sale pending|under contract", low)
+                  else "active")
+        out.append(_base(
+            "padgett", "Padgett Advisors", url,
+            firm_type=clean_title(title),
+            state=state_deep(title, text[:1500]),
+            revenue=rev,
+            description=desc or best_description(text),
+            services=services_from(title + " " + (desc or "")[:400]),
+            status=status,
+        ))
+    log.info("padgett: %s listings", len(out))
+    return out
+
+
+ALL_SOURCES.update({
+    "prohorizons": scrape_prohorizons,
+    "padgett": scrape_padgett,
 })
