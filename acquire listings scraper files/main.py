@@ -52,8 +52,9 @@ def run(mode: str = "deep"):
         return {"ok": False, "reason": "all sources failed"}
 
     try:
-        from engine import deduplicate
+        from engine import deduplicate, flag_direct_sellers
         scraped = deduplicate(scraped)
+        scraped = flag_direct_sellers(scraped)
         stats = sync(scraped, ran, first_ever_run=legacy)
     except Exception as e:
         # A failure here must not look like a healthy exit, but it also must not

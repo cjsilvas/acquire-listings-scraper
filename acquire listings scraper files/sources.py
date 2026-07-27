@@ -7,7 +7,7 @@ Adding a broker means adding one function here and one line in ALL_SOURCES.
 
 import re, html, logging
 from typing import List, Dict, Optional
-from engine import fetch, fingerprint
+from engine import fetch, fetch_via_api, fingerprint
 
 log = logging.getLogger("fold.sources")
 
@@ -781,4 +781,274 @@ def scrape_abizbrokers() -> List[Dict]:
 
 ALL_SOURCES.update({
     "abizbrokers": scrape_abizbrokers,
+})
+
+
+# ----------------------------------------------------------------------
+# DealStream   general marketplace. Listings sit in the page's ld+json
+# SearchResultsPage "about" array; each detail page carries a Product
+# with an Offer (price + availability = status). A marketplace, so the
+# engine ranks it below origin brokers and the match logic hides any
+# listing that an origin broker already carries.
+# ----------------------------------------------------------------------
+
+DS_CITY_STATE = {
+    "detroit": "MI", "grand rapids": "MI", "chicago": "IL", "philadelphia": "PA",
+    "marin": "CA", "san francisco": "CA", "sarasota": "FL", "montgomery county": "PA",
+    "bucks county": "PA", "oakland county": "MI", "palm beach": "FL", "hernando": "FL",
+    "indianapolis": "IN", "hartford": "CT", "albuquerque": "NM", "new orleans": "LA",
+    "union county": "NJ", "houston": "TX", "dallas": "TX", "austin": "TX",
+    "atlanta": "GA", "denver": "CO", "seattle": "WA", "portland": "OR",
+    "boston": "MA", "nashville": "TN", "tampa": "FL", "orlando": "FL", "miami": "FL",
+    "phoenix": "AZ", "tucson": "AZ", "charlotte": "NC", "raleigh": "NC",
+    "columbus": "OH", "cleveland": "OH", "cincinnati": "OH", "kansas city": "MO",
+    "st louis": "MO", "st. louis": "MO", "minneapolis": "MN", "milwaukee": "WI",
+    "brooklyn": "NY", "manhattan": "NY", "long island": "NY", "westchester": "NY",
+}
+
+DS_AVAIL = {
+    "InStock": "active", "PreOrder": "pending",
+    "SoldOut": "sold", "OutOfStock": "sold", "Discontinued": "sold",
+}
+
+DS_NON_ACCT = re.compile(
+    r"\b(POS|kiosk|point-of-sale|restaurant|retail|manufactur|construction|"
+    r"dental|medical|law firm|hvac|plumbing|landscap|salon|gym|fitness|"
+    r"liquor|laundr|car wash|franchise resale)\b", re.I)
+
+
+def _ds_state(text):
+    if not text:
+        return None
+    st = state_from(text)
+    if st:
+        return st
+    low = text.lower()
+    for city, ab in DS_CITY_STATE.items():
+        if city in low:
+            return ab
+    return None
+
+
+def _ds_money(text):
+    if not text:
+        return None
+    m = re.search(r"\$([\d,]+(?:\.\d+)?)\s*(mm|m|k)\b", text, re.I)
+    if m:
+        n = float(m.group(1).replace(",", ""))
+        unit = m.group(2).lower()
+        return int(n * (1_000_000 if unit in ("mm", "m") else 1_000))
+    m = re.search(r"\$([\d,]{4,})", text)
+    return int(m.group(1).replace(",", "")) if m else None
+
+
+def _ds_ldjson(page, want_type):
+    for blk in re.findall(r'<script type="application/ld\+json">(.*?)</script>', page, re.S):
+        try:
+            import json as _json
+            j = _json.loads(blk)
+            if j.get("@type") == want_type:
+                return j
+        except Exception:
+            continue
+    return None
+
+
+def scrape_dealstream(deep: bool = False) -> List[Dict]:
+    """
+    Index-only by default. DealStream throttles a datacenter IP that fetches
+    many detail pages quickly, so the routine light pass reads only the index
+    (which already carries title, description, status words, and revenue where
+    published). Pass deep=True on an infrequent schedule to fill price/status
+    gaps from detail pages, and even then we go slowly and cap the count.
+    """
+    out, seen = [], set()
+    import time as _time
+    for pg in range(1, 10):
+        idx = "https://dealstream.com/accounting-practices-for-sale" + (f"/{pg}" if pg > 1 else "")
+        page = fetch_via_api(idx)
+        if not page:
+            break
+        srp = _ds_ldjson(page, "SearchResultsPage")
+        if not srp or not srp.get("about"):
+            break
+        new = 0
+        for a in srp["about"]:
+            it = a.get("item", {})
+            url = it.get("url", "")
+            if not url or url in seen:
+                continue
+            seen.add(url)
+            new += 1
+            name = html.unescape((it.get("name") or "").replace(" - DealStream", "")).strip()
+            desc = html.unescape((it.get("description") or "")).strip()
+            blob = name + " | " + desc
+            if DS_NON_ACCT.search(blob) and not re.search(r"\b(CPA|accounting|tax|bookkeep|audit)\b", name, re.I):
+                continue
+
+            rev = _ds_money(name) or _ds_money(desc)
+            ask = None
+            low = blob.lower()
+            status = ("sold" if re.search(r"\bsold\b", low)
+                      else "pending" if re.search(r"sale pending|under contract", low)
+                      else "active")
+
+            out.append(_base(
+                "dealstream", "DealStream", url,
+                firm_type=clean_title(name),
+                state=_ds_state(name) or _ds_state(desc),
+                revenue=rev,
+                asking_price=ask,
+                description=desc[:1500] or None,
+                services=services_from(blob),
+                status=status,
+                listing_code="DS-" + url.rstrip("/").split("/")[-1],
+            ))
+        if new == 0:
+            break
+
+    # Optional gentle deep pass: fill gaps from detail pages, slowly, capped.
+    if deep:
+        filled = 0
+        for item in out:
+            if filled >= 40:
+                break
+            if item["revenue"] is not None and item["asking_price"] is not None:
+                continue
+            detail = fetch_via_api(item["source_url"])
+            _time.sleep(1.5)
+            if not detail:
+                continue
+            filled += 1
+            prod = _ds_ldjson(detail, "Product")
+            if prod:
+                offer = prod.get("offers", {}) or {}
+                if offer.get("price") and not item["asking_price"]:
+                    item["asking_price"] = int(offer["price"])
+                avail = (offer.get("availability") or "").rsplit("/", 1)[-1]
+                if avail in DS_AVAIL:
+                    item["status"] = DS_AVAIL[avail]
+            if item["revenue"] is None:
+                m = re.search(r"(?:Revenue|Sales|Gross)\D{0,12}\$([\d,]{4,})", strip_tags(detail))
+                if m:
+                    item["revenue"] = int(m.group(1).replace(",", ""))
+
+    log.info("dealstream: %s listings (deep=%s)", len(out), deep)
+    return out
+
+
+ALL_SOURCES.update({
+    "dealstream": scrape_dealstream,
+})
+
+
+# ----------------------------------------------------------------------
+# BizBuySell   the largest general marketplace. Blocks datacenter IPs hard;
+# reachable only through ScraperAPI's ultra premium pool. Listings sit in the
+# same ld+json SearchResultsPage "about" array pattern as DealStream, 50-57 per
+# page across ~12 pages (~577 total). A marketplace, so ranked below origin
+# brokers; the match logic hides any listing a broker already carries and flags
+# the rest as possible direct sellers (this is where owner-listed FSBO deals
+# turn up). Detail pages carry asking price, cash flow, and gross revenue.
+# ----------------------------------------------------------------------
+
+def _bbs_about(page):
+    for b in re.findall(r'<script type="application/ld\+json"[^>]*>(.*?)</script>', page, re.S):
+        try:
+            import json as _json
+            j = _json.loads(b.strip())
+            if isinstance(j, dict) and j.get("about"):
+                return j["about"]
+        except Exception:
+            continue
+    return None
+
+
+def _bbs_state(text):
+    if not text:
+        return None
+    m = re.search(r",\s*([A-Z]{2})\b", text)
+    if m and m.group(1) in ABBR:
+        return m.group(1)
+    return state_from(text)
+
+
+def scrape_bizbuysell(deep: bool = False) -> List[Dict]:
+    """
+    Index pulls title, description, url, and (where the card renders it) location.
+    Routed through ScraperAPI ultra premium. deep=True re-reads detail pages to
+    fill asking price, cash flow, gross revenue, and status; capped and paced to
+    keep credit spend sane.
+    """
+    out, seen = [], set()
+    import time as _time
+    for pg in range(1, 14):
+        idx = "https://www.bizbuysell.com/accounting-businesses-and-tax-practices-for-sale/" + (f"{pg}/" if pg > 1 else "")
+        page = fetch_via_api(idx, ultra=True)
+        if not page:
+            break
+        about = _bbs_about(page)
+        if not about:
+            break
+        locs = re.findall(r'<p class="location[^"]*">([^<]+)</p>', page)
+        new = 0
+        for i, entry in enumerate(about):
+            p = entry.get("item", {})
+            url = p.get("url", "")
+            if not url or url in seen:
+                continue
+            seen.add(url)
+            new += 1
+            name = html.unescape(p.get("name") or "").strip()
+            desc = html.unescape(p.get("description") or "").strip()
+            loc = (locs[i].strip() if i < len(locs) else "")
+            blob = name + " | " + desc
+            rev = _ds_money(name) or _ds_money(desc)
+            low = blob.lower()
+            status = ("sold" if re.search(r"\bsold\b", low)
+                      else "pending" if re.search(r"under contract|sale pending", low)
+                      else "active")
+            out.append(_base(
+                "bizbuysell", "BizBuySell", url,
+                firm_type=clean_title(name),
+                city=loc.split(",")[0].strip() if loc else None,
+                state=_bbs_state(loc) or _bbs_state(desc),
+                revenue=rev,
+                description=desc[:1500] or None,
+                services=services_from(blob),
+                status=status,
+                listing_code="BBS-" + url.rstrip("/").split("/")[-1],
+            ))
+        if new == 0:
+            break
+        _time.sleep(1)
+
+    if deep:
+        filled = 0
+        for item in out:
+            if filled >= 60:
+                break
+            if item["revenue"] is not None and item["state"] is not None:
+                continue
+            detail = fetch_via_api(item["source_url"], ultra=True)
+            _time.sleep(1)
+            if not detail:
+                continue
+            filled += 1
+            dtext = strip_tags(detail)
+            if item["revenue"] is None:
+                m = re.search(r"(?:Gross Revenue|Gross Income|Revenue)\D{0,12}\$([\d,]{4,})", dtext)
+                if m:
+                    item["revenue"] = int(m.group(1).replace(",", ""))
+            if item["state"] is None:
+                m = re.search(r",\s*([A-Z]{2})\b", dtext)
+                if m and m.group(1) in ABBR:
+                    item["state"] = m.group(1)
+
+    log.info("bizbuysell: %s listings (deep=%s)", len(out), deep)
+    return out
+
+
+ALL_SOURCES.update({
+    "bizbuysell": scrape_bizbuysell,
 })

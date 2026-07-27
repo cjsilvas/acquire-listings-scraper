@@ -27,7 +27,16 @@ UA = "FoldListingsBot/1.0 (accounting practice aggregator; contact: cj@eagleeyee
 SOURCE_PRIORITY = {
     "aba": 1, "naab": 1, "aps": 1, "poe": 1, "ppt": 1, "atb": 1,
     "prohorizons": 1, "padgett": 1, "abizbrokers": 1,
-    "businessesforsale": 5,
+    "businessesforsale": 5, "dealstream": 5, "bizbuysell": 5,
+    "bizquest": 5, "loopnet": 5, "karbon": 5,
+}
+
+# Sources that aggregate listings from many origins rather than originating them.
+# A listing from one of these that survives dedupe (i.e. matches no origin broker)
+# is likely a direct-from-seller deal, and gets flagged as such for the frontend.
+MARKETPLACE_SOURCES = {
+    "businessesforsale", "dealstream", "bizbuysell",
+    "bizquest", "loopnet", "karbon",
 }
 
 # A source must not lose more than this share of its listings in one run.
@@ -76,6 +85,49 @@ def fetch(url: str, tries: int = 4, pause: float = 0.4) -> Optional[str]:
             log.warning("fetch %s failed: %s (attempt %s)", url, e, attempt + 1)
         time.sleep(pause * (attempt + 2))
     log.error("fetch gave up on %s, last status %s", url, last)
+    return None
+
+
+SCRAPER_API_KEY = os.environ.get("SCRAPER_API_KEY", "")
+
+
+def fetch_via_api(url: str, tries: int = 3, render: bool = False,
+                  premium: bool = False, ultra: bool = False) -> Optional[str]:
+    """
+    Fetch through ScraperAPI's residential proxy pool, for marketplace sources
+    that block datacenter IPs (DealStream, BizQuest, BizBuySell, ...). Reads the
+    key from the SCRAPER_API_KEY environment variable so it never lives in the
+    repo. If no key is set, falls back to a direct fetch so nothing hard-breaks.
+    Failed ScraperAPI requests are not billed. render/premium/ultra cost more
+    credits, so leave them off unless a target needs them: DealStream and BizQuest
+    work on the standard pool (1 credit), BizBuySell needs ultra=True (ultra
+    premium proxies, a paid-plan feature and more credits per request).
+    """
+    if not SCRAPER_API_KEY:
+        log.warning("no SCRAPER_API_KEY set, direct-fetching %s", url)
+        return fetch(url)
+    params = {"api_key": SCRAPER_API_KEY, "url": url}
+    if render:
+        params["render"] = "true"
+    if ultra:
+        params["ultra_premium"] = "true"
+    elif premium:
+        params["premium"] = "true"
+    last = None
+    for attempt in range(tries):
+        try:
+            r = requests.get("https://api.scraperapi.com/", params=params, timeout=90)
+            last = r.status_code
+            if r.status_code == 200:
+                return r.text
+            log.warning("fetch_via_api %s returned %s (attempt %s)", url, r.status_code, attempt + 1)
+            if r.status_code == 500 and not (premium or ultra):
+                log.warning("  (target may need premium/ultra, a paid-plan feature)")
+            time.sleep(2 * (attempt + 1))
+        except Exception as e:
+            log.warning("fetch_via_api %s failed: %s (attempt %s)", url, e, attempt + 1)
+            time.sleep(2 * (attempt + 1))
+    log.error("fetch_via_api gave up on %s, last status %s", url, last)
     return None
 
 
@@ -161,6 +213,25 @@ def deduplicate(listings: List[Dict]) -> List[Dict]:
     if dropped:
         log.info("dedupe collapsed %s duplicate listings", dropped)
     return list(best.values())
+
+
+def flag_direct_sellers(listings: List[Dict]) -> List[Dict]:
+    """
+    Run AFTER deduplicate. Any listing still standing that came from a
+    marketplace matched no origin broker, so it is likely a direct-from-seller
+    deal. Tag it so the frontend can surface that. A marketplace listing that
+    HAD matched an origin broker would already be gone (broker won the dedupe).
+    """
+    flagged = 0
+    for item in listings:
+        if item.get("source") in MARKETPLACE_SOURCES:
+            item["seller_note"] = "No broker found - possibly direct to seller"
+            flagged += 1
+        else:
+            item["seller_note"] = None
+    if flagged:
+        log.info("flagged %s marketplace listings as possible direct sellers", flagged)
+    return listings
 
 
 def _wins(a: Dict, b: Dict) -> bool:
@@ -256,6 +327,8 @@ def sync(scraped: List[Dict], sources_run: List[str], first_ever_run: bool) -> D
             "available_after": item.get("available_after"),
             "status": item.get("status", "active"),
             "active": item.get("status", "active") in ("active", "pending"),
+            "seller_note": item.get("seller_note"),
+            "also_listed_at": item.get("also_listed_at") or [],
             "last_seen": now,
             "miss_count": 0,
         }
