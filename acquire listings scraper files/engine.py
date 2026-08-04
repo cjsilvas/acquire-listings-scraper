@@ -14,6 +14,7 @@ from typing import List, Dict, Optional
 
 import requests
 from supabase import create_client
+from metrics import compute_metrics
 
 log = logging.getLogger("fold")
 
@@ -128,6 +129,39 @@ def fetch_via_api(url: str, tries: int = 3, render: bool = False,
             log.warning("fetch_via_api %s failed: %s (attempt %s)", url, e, attempt + 1)
             time.sleep(2 * (attempt + 1))
     log.error("fetch_via_api gave up on %s, last status %s", url, last)
+    return None
+
+
+def url_is_gone(url: str, via_api: bool = False) -> Optional[bool]:
+    """
+    Confirm whether a listing URL has truly been removed. Returns:
+      True   the page is gone (404 / 410) -> safe to retire
+      False  the page is live (200)        -> do NOT retire, it is a false miss
+      None   we could not tell (timeout, 500, block) -> stay cautious, do not retire
+
+    Marketplaces like BizBuySell never mark a deal "sold" - a removed listing just
+    stops resolving. So a confirmed 404 is the real removal signal. We separate that
+    from a temporary failure so a network blip never wrongly retires a live listing.
+    Marketplace URLs go through the proxy (via_api=True); origin brokers fetch direct.
+    """
+    for attempt in range(2):
+        try:
+            if via_api and SCRAPER_API_KEY:
+                r = requests.get(
+                    "https://api.scraperapi.com/",
+                    params={"api_key": SCRAPER_API_KEY, "url": url, "ultra_premium": "true"},
+                    timeout=90,
+                )
+            else:
+                r = requests.get(url, headers=HEADERS, timeout=40)
+            if r.status_code in (404, 410):
+                return True
+            if r.status_code == 200 and len(r.text) > 2000:
+                return False
+            # 500 / 403 / tiny body -> inconclusive, try once more then give up
+        except Exception as e:
+            log.warning("url_is_gone check failed for %s: %s", url, e)
+        time.sleep(2 * (attempt + 1))
     return None
 
 
@@ -333,6 +367,15 @@ def sync(scraped: List[Dict], sources_run: List[str], first_ever_run: bool) -> D
             "miss_count": 0,
         }
 
+        # Modeled deal metrics (SDE, debt service, DSCR, monthly cash flow).
+        # Uses the listing's own cash flow as SDE when present, else models it
+        # off revenue with the tiered margin. Skips junk/near-zero revenue.
+        _rev = row.get("revenue")
+        if _rev and _rev >= 15000:
+            m = compute_metrics(_rev, row.get("cash_flow"))
+            if m:
+                row.update(m)
+
         if prior is None:
             row["first_seen"] = now
             # Everything present on the very first run has unknown true age.
@@ -369,7 +412,26 @@ def sync(scraped: List[Dict], sources_run: List[str], first_ever_run: bool) -> D
             db.table("listings").update({"miss_count": misses}).eq("fingerprint", fp).execute()
             continue
 
-        # Gone for two consecutive runs. We do not know why, so we say so.
+        # Gone for two consecutive runs. Before retiring, confirm the detail page is
+        # actually removed. A marketplace listing that merely fell off the index (e.g.
+        # pushed past the pages we scrape) is still live and must NOT be retired; only
+        # a genuine 404/410 counts. If the check is inconclusive, we hold - a network
+        # blip should never bury a live deal.
+        url = prior.get("source_url")
+        gone = url_is_gone(url, via_api=prior["source"] in MARKETPLACE_SOURCES) if url else None
+        if gone is False:
+            # Still live - false miss. Reset the counter and refresh last_seen.
+            db.table("listings").update({
+                "miss_count": 0,
+                "last_seen": now,
+            }).eq("fingerprint", fp).execute()
+            continue
+        if gone is None:
+            # Could not confirm. Keep the miss count where it is and wait for next run.
+            db.table("listings").update({"miss_count": misses}).eq("fingerprint", fp).execute()
+            continue
+
+        # Confirmed gone (404/410). Retire it, freezing days-on-market at last seen.
         db.table("listings").update({
             "status": "no_longer_listed",
             "active": False,

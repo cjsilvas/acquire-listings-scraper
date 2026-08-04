@@ -911,7 +911,7 @@ def scrape_dealstream(deep: bool = False) -> List[Dict]:
     if deep:
         filled = 0
         for item in out:
-            if filled >= 40:
+            if filled >= 150:
                 break
             if item["revenue"] is not None and item["asking_price"] is not None:
                 continue
@@ -973,6 +973,77 @@ def _bbs_state(text):
     return state_from(text)
 
 
+# Current year used to judge staleness. BizBuySell never publishes a listing date,
+# so the only age signal is the content itself: a listing that quotes financial
+# figures from two or more years ago is very likely old (sold, expired, or stale).
+_CURRENT_YEAR = 2026
+
+# A year tied to FINANCIAL/reporting language (revenue, cash flow, gross, etc).
+# This is the age signal. We deliberately do NOT treat "established in 2018" or
+# "serving since 2005" as staleness - those are founding dates, not listing age.
+_FIN_YEAR = re.compile(
+    r'(20[12]\d)\s*(?:gross|revenue|revenues|sales|cash\s*flow|billings|sde|net|profit|income|trailing|projected|expected|estimated)'
+    r'|(?:gross|revenue|revenues|sales|cash\s*flow|billings|sde|net|profit|income|trailing|projected|expected|estimated|for|in|through|fy)\s*'
+    r'(?:of\s*|around\s*|about\s*|approximately\s*)?(?:\$?[\d,]+\s*(?:in|for)?\s*)?(20[12]\d)',
+    re.I)
+_FOUNDING = re.compile(
+    r'(?:established|since|founded|inception|operating since|in business since|serving since|est\.?)\s*(?:in\s*)?(20[12]\d)',
+    re.I)
+
+
+def stale_data_note(text: str) -> Optional[str]:
+    """
+    If the description cites financial data from two or more years ago, return a
+    plain-language caution. Returns None when the newest financial year is recent
+    or absent. Founding years are excluded so 'established 2018' never trips it.
+    """
+    if not text:
+        return None
+    founding = set(re.findall(_FOUNDING, text))
+    years = []
+    for m in _FIN_YEAR.finditer(text):
+        y = m.group(1) or m.group(2)
+        if y and y not in founding and 2015 <= int(y) <= _CURRENT_YEAR:
+            years.append(int(y))
+    if not years:
+        return None
+    newest = max(years)
+    if newest <= _CURRENT_YEAR - 2:
+        return (f"This listing references financial data from {newest} or earlier "
+                f"and may be outdated. Verify it is still available.")
+    return None
+
+
+# First-person seller language -> likely the owner is listing directly.
+_OWNER_LANG = re.compile(
+    r"\b(i am selling|i'm selling|i am retiring|i'm retiring|my practice|my firm|"
+    r"my clients|my book of business|owner is selling|selling my|i have (?:built|owned|run)|"
+    r"i built|i started|reach out to me|contact me directly|i will assist|i am the owner|"
+    r"by owner|for sale by owner|fsbo|direct from (?:the )?owner)\b", re.I)
+# Third-party representation -> a broker/advisor, which is our default assumption.
+_BROKER_LANG = re.compile(
+    r'\b(broker|brokerage|listing agent|we are pleased to (?:present|offer)|'
+    r'our (?:client|firm) is|represented by|confidential listing|advisor is pleased|'
+    r'is pleased to (?:present|announce|offer)|contact (?:the )?(?:broker|advisor|agent)|'
+    r'business advisors?|transworld|sunbelt|murphy business)\b', re.I)
+
+
+def seller_flag(text: str) -> str:
+    """
+    Decide the seller note. Default is broker-assumed ('possibly direct to seller');
+    only clear first-person owner language (with no competing broker language) upgrades
+    it to a stronger direct-owner note. Broker language keeps the default.
+    """
+    default = "No broker found - possibly direct to seller"
+    if not text:
+        return default
+    owner = bool(_OWNER_LANG.search(text))
+    broker = bool(_BROKER_LANG.search(text))
+    if owner and not broker:
+        return "Language suggests direct owner, not broker represented"
+    return default
+
+
 def scrape_bizbuysell(deep: bool = False) -> List[Dict]:
     """
     Index pulls title, description, url, and (where the card renders it) location.
@@ -997,6 +1068,15 @@ def scrape_bizbuysell(deep: bool = False) -> List[Dict]:
             url = p.get("url", "")
             if not url or url in seen:
                 continue
+            # Skip non-listing pages: broker profiles, franchises, asset/real-estate
+            # sales, and start-ups. These are not accounting practices for sale and
+            # were polluting the feed.
+            low_url = url.lower()
+            if any(j in low_url for j in (
+                    "/business-broker/", "/franchise-for-sale/", "/business-asset/",
+                    "/business-real-estate", "/start-up-business/")):
+                seen.add(url)
+                continue
             seen.add(url)
             new += 1
             name = html.unescape(p.get("name") or "").strip()
@@ -1008,6 +1088,10 @@ def scrape_bizbuysell(deep: bool = False) -> List[Dict]:
             status = ("sold" if re.search(r"\bsold\b", low)
                       else "pending" if re.search(r"under contract|sale pending", low)
                       else "active")
+            note = seller_flag(blob)
+            stale = stale_data_note(desc)
+            if stale:
+                note = note + " | " + stale
             out.append(_base(
                 "bizbuysell", "BizBuySell", url,
                 firm_type=clean_title(name),
@@ -1017,6 +1101,7 @@ def scrape_bizbuysell(deep: bool = False) -> List[Dict]:
                 description=desc[:1500] or None,
                 services=services_from(blob),
                 status=status,
+                seller_note=note,
                 listing_code="BBS-" + url.rstrip("/").split("/")[-1],
             ))
         if new == 0:
@@ -1026,9 +1111,10 @@ def scrape_bizbuysell(deep: bool = False) -> List[Dict]:
     if deep:
         filled = 0
         for item in out:
-            if filled >= 60:
+            if filled >= 250:
                 break
-            if item["revenue"] is not None and item["state"] is not None:
+            if (item["revenue"] is not None and item["state"] is not None
+                    and item.get("asking_price") is not None):
                 continue
             detail = fetch_via_api(item["source_url"], ultra=True)
             _time.sleep(1)
@@ -1037,9 +1123,13 @@ def scrape_bizbuysell(deep: bool = False) -> List[Dict]:
             filled += 1
             dtext = strip_tags(detail)
             if item["revenue"] is None:
-                m = re.search(r"(?:Gross Revenue|Gross Income|Revenue)\D{0,12}\$([\d,]{4,})", dtext)
+                m = re.search(r"Gross (?:Revenue|Income)\D{0,8}\$?([\d,]{4,})", dtext, re.I)
                 if m:
                     item["revenue"] = int(m.group(1).replace(",", ""))
+            if item.get("asking_price") is None:
+                m = re.search(r"Asking Price\D{0,8}\$?([\d,]{4,})", dtext, re.I)
+                if m:
+                    item["asking_price"] = int(m.group(1).replace(",", ""))
             if item["state"] is None:
                 m = re.search(r",\s*([A-Z]{2})\b", dtext)
                 if m and m.group(1) in ABBR:
