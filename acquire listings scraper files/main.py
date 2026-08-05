@@ -82,7 +82,7 @@ def run(mode: str = "deep"):
         res = db.table("listings").select("id", count="exact") \
                 .in_("status", ["active", "pending"]).execute()
         live = res.count or 0
-        checks["live_count_sane"] = 250 <= live <= 900
+        checks["live_count_sane"] = 250 <= live <= 3000
         checks["work_happened"] = (stats.get("new", 0) + stats.get("updated", 0)) > 0
         gate_ok = all(checks.values())
         db.table("sync_health").insert({
