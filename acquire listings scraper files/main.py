@@ -31,7 +31,7 @@ def run(mode: str = "deep"):
     scraped, ran = [], []
     for name, fn in ALL_SOURCES.items():
         try:
-            items = fn()
+            items = fn(deep=(mode=="deep")) if "deep" in fn.__code__.co_varnames else fn()
             scraped.extend(items)
             ran.append(name)
         except Exception as e:
