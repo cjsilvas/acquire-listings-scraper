@@ -1300,3 +1300,60 @@ def scrape_afs() -> List[Dict]:
 ALL_SOURCES.update({
     "afs": scrape_afs,
 })
+
+
+# ----------------------------------------------------------------------
+# Business Brokerage Inc  (go2bbi.com)  California-focused accounting/tax
+# practice broker, 40+ years. Current listings render on the homepage in a
+# text format: "PRACTICE#[code] [LOCATION] $[gross] GROSS. [details]".
+# All CA. Works on the standard proxy pool.
+# ----------------------------------------------------------------------
+
+def scrape_bbi() -> List[Dict]:
+    out = []
+    page = fetch_via_api("https://go2bbi.com/")
+    if not page:
+        log.info("bbi: no page")
+        return out
+    txt = re.sub(r'\s+', ' ', html.unescape(strip_tags(page)))
+    parts = re.split(r'(PRACTICE\s*#\s*\d+)', txt)
+    seen = set()
+    for i in range(1, len(parts), 2):
+        mcode = re.search(r'(\d+)', parts[i])
+        if not mcode:
+            continue
+        code = mcode.group(1)
+        if code in seen:
+            continue
+        body = parts[i + 1] if i + 1 < len(parts) else ""
+        m = re.search(r'^\s*([A-Z][A-Za-z .\-]+?)\s+\$([\d,]{4,})\s+GROSS', body)
+        if not m:
+            continue
+        seen.add(code)
+        loc = m.group(1).strip()
+        gross = int(m.group(2).replace(",", ""))
+        desc = re.sub(r'\s+', ' ', body[:600]).strip()
+        low = desc.lower()
+        status = ("sold" if re.search(r"\bsold\b", low)
+                  else "pending" if re.search(r"under contract|sale pending|in escrow", low)
+                  else "active")
+        out.append(_base(
+            "bbi", "Business Brokerage Inc",
+            "https://go2bbi.com/",
+            firm_type=clean_title((loc.title() + " Accounting Practice")),
+            city=loc.title(),
+            state="CA",
+            revenue=gross,
+            description=desc[:1500] or None,
+            services=services_from(desc),
+            status=status,
+            seller_note=seller_flag(desc),
+            listing_code="BBI-" + code,
+        ))
+    log.info("bbi: %s listings", len(out))
+    return out
+
+
+ALL_SOURCES.update({
+    "bbi": scrape_bbi,
+})
