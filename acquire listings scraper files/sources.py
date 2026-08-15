@@ -1237,3 +1237,66 @@ def scrape_bizquest(deep: bool = False) -> List[Dict]:
 ALL_SOURCES.update({
     "bizquest": scrape_bizquest,
 })
+
+
+# ----------------------------------------------------------------------
+# AccountingFirmSold  (accountingfirmsold.com)  national broker, 35+ yrs.
+# Single listings page with a clean HTML table: Listing Number, Location,
+# Annual Gross, Asking Price, Description, Status. All data is in the index
+# so no deep pass is needed. Works on the standard proxy pool.
+# ----------------------------------------------------------------------
+
+def scrape_afs() -> List[Dict]:
+    out = []
+    page = fetch_via_api("https://accountingfirmsold.com/listings/")
+    if not page:
+        log.info("afs: no page")
+        return out
+    rows = re.findall(r'<tr>(.*?)</tr>', page, re.S)
+    for r in rows:
+        cells = dict(re.findall(r'data-th="([^"]+)">\s*(.*?)\s*</td>', r, re.S))
+        if not cells:
+            continue
+        cells = {k: re.sub(r'\s+', ' ', html.unescape(re.sub(r'<[^>]+>', '', v))).strip()
+                 for k, v in cells.items()}
+        code = cells.get("Listing Number")
+        if not code:
+            continue
+        loc = cells.get("Location", "")
+        desc = cells.get("Description", "")
+        gross = cells.get("Annual Gross", "")
+        asking = cells.get("Asking Price", "")
+        raw_status = (cells.get("Status", "") or "").lower()
+        status = ("sold" if "sold" in raw_status
+                  else "pending" if ("pending" in raw_status or "under contract" in raw_status)
+                  else "active")
+        rev = None
+        m = re.search(r'\$?([\d,]{4,})', gross)
+        if m:
+            rev = int(m.group(1).replace(",", ""))
+        ask = None
+        m = re.search(r'\$\s*([\d,]{4,})', asking)
+        if m:
+            ask = int(m.group(1).replace(",", ""))
+        blob = loc + " | " + desc
+        out.append(_base(
+            "afs", "Accounting Firm Sold",
+            "https://accountingfirmsold.com/listings/",
+            firm_type=clean_title(desc.split(".")[0][:80]) if desc else "Accounting Practice",
+            city=loc.split(",")[0].strip() if "," in loc else (loc if loc and loc != "United States" else None),
+            state=_bbs_state(loc) or state_from(loc) or state_deep(desc),
+            revenue=rev,
+            asking_price=ask,
+            description=desc[:1500] or None,
+            services=services_from(blob),
+            status=status,
+            seller_note=seller_flag(blob),
+            listing_code="AFS-" + code,
+        ))
+    log.info("afs: %s listings", len(out))
+    return out
+
+
+ALL_SOURCES.update({
+    "afs": scrape_afs,
+})
