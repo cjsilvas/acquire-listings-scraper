@@ -1142,3 +1142,98 @@ def scrape_bizbuysell(deep: bool = False) -> List[Dict]:
 ALL_SOURCES.update({
     "bizbuysell": scrape_bizbuysell,
 })
+
+
+# ----------------------------------------------------------------------
+# BizQuest  (bizquest.com)  BizBuySell's sibling site, same parent + same
+# ld+json "about" structure. Works on the standard proxy pool (1 credit),
+# so cheaper than BizBuySell. deep=True re-reads detail pages for asking
+# price, gross revenue, and state, same as BizBuySell.
+# ----------------------------------------------------------------------
+
+def scrape_bizquest(deep: bool = False) -> List[Dict]:
+    out, seen = [], set()
+    import time as _time
+    for pg in range(1, 12):
+        idx = "https://www.bizquest.com/cpa-firms-for-sale/" + (f"page-{pg}/" if pg > 1 else "")
+        page = fetch_via_api(idx)
+        if not page:
+            break
+        about = _bbs_about(page)
+        if not about:
+            break
+        new = 0
+        for entry in about:
+            p = entry.get("item", {})
+            url = p.get("url", "")
+            if not url or url in seen:
+                continue
+            low_url = url.lower()
+            if any(j in low_url for j in (
+                    "/business-broker/", "/franchise-for-sale/", "/business-asset/",
+                    "/business-real-estate", "/start-up-business/")):
+                seen.add(url)
+                continue
+            seen.add(url)
+            new += 1
+            name = html.unescape(p.get("name") or "").strip()
+            desc = html.unescape(p.get("description") or "").strip()
+            blob = name + " | " + desc
+            rev = _ds_money(name) or _ds_money(desc)
+            low = blob.lower()
+            status = ("sold" if re.search(r"\bsold\b", low)
+                      else "pending" if re.search(r"under contract|sale pending|\[sale pending\]", low)
+                      else "active")
+            note = seller_flag(blob)
+            stale = stale_data_note(desc)
+            if stale:
+                note = note + " | " + stale
+            out.append(_base(
+                "bizquest", "BizQuest", url,
+                firm_type=clean_title(name),
+                state=_bbs_state(name) or _bbs_state(desc),
+                revenue=rev,
+                description=desc[:1500] or None,
+                services=services_from(blob),
+                status=status,
+                seller_note=note,
+                listing_code="BQ-" + url.rstrip("/").split("/")[-1],
+            ))
+        if new == 0:
+            break
+        _time.sleep(1)
+
+    if deep:
+        filled = 0
+        for item in out:
+            if filled >= 250:
+                break
+            if (item["revenue"] is not None and item["state"] is not None
+                    and item.get("asking_price") is not None):
+                continue
+            detail = fetch_via_api(item["source_url"])
+            _time.sleep(1)
+            if not detail:
+                continue
+            filled += 1
+            dtext = strip_tags(detail)
+            if item["revenue"] is None:
+                m = re.search(r"Gross (?:Revenue|Income)\D{0,8}\$?([\d,]{4,})", dtext, re.I)
+                if m:
+                    item["revenue"] = int(m.group(1).replace(",", ""))
+            if item.get("asking_price") is None:
+                m = re.search(r"Asking Price\D{0,8}\$?([\d,]{4,})", dtext, re.I)
+                if m:
+                    item["asking_price"] = int(m.group(1).replace(",", ""))
+            if item["state"] is None:
+                m = re.search(r",\s*([A-Z]{2})\b", dtext)
+                if m and m.group(1) in ABBR:
+                    item["state"] = m.group(1)
+
+    log.info("bizquest: %s listings (deep=%s)", len(out), deep)
+    return out
+
+
+ALL_SOURCES.update({
+    "bizquest": scrape_bizquest,
+})
