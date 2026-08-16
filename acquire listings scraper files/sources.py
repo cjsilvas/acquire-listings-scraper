@@ -1359,71 +1359,113 @@ ALL_SOURCES.update({
 })
 
 
+
+
+
 # ----------------------------------------------------------------------
 # Accounting Practice Exchange  (accountingpracticeexchange.com)  aggregator
-# that carries both broker listings and private-seller (FSBO) deals. Server
-# rendered Next.js: the listings render into a clean table on the page, so a
-# render fetch returns them in HTML. Needs render=True. Most rows re-list
-# brokers we already scrape (ABA, Poe); dedupe collapses those and the unique
-# value is the Private Seller rows. Ref detail pages live at /Sales/<state>/<ref>.
+# carrying broker and private-seller (FSBO) deals. Each state has its own
+# server rendered page at /Sales/<STATE-NAME> listing that state's ENTIRE
+# history, with a status tag per row: new / available / sale pending /
+# expired / sold. We keep only the live ones (new, available, sale pending)
+# and drop expired/sold. Needs render=True. Priced lower than other
+# marketplaces in dedupe, so origin brokers (ABA, Poe, ProHorizons) win and
+# only APE's exclusive private-seller rows survive.
 # ----------------------------------------------------------------------
 
+_APE_STATES = [
+    "ALABAMA", "ALASKA", "ARIZONA", "ARKANSAS", "CALIFORNIA", "COLORADO",
+    "CONNECTICUT", "DELAWARE", "DISTRICT-OF-COLUMBIA", "FLORIDA", "GEORGIA",
+    "HAWAII", "IDAHO", "ILLINOIS", "INDIANA", "IOWA", "KANSAS", "KENTUCKY",
+    "LOUISIANA", "MAINE", "MARYLAND", "MASSACHUSETTS", "MICHIGAN", "MINNESOTA",
+    "MISSISSIPPI", "MISSOURI", "MONTANA", "NEBRASKA", "NEVADA", "NEW-HAMPSHIRE",
+    "NEW-JERSEY", "NEW-MEXICO", "NEW-YORK", "NORTH-CAROLINA", "NORTH-DAKOTA",
+    "OHIO", "OKLAHOMA", "OREGON", "PENNSYLVANIA", "RHODE-ISLAND",
+    "SOUTH-CAROLINA", "SOUTH-DAKOTA", "TENNESSEE", "TEXAS", "UTAH", "VERMONT",
+    "VIRGINIA", "WASHINGTON", "WEST-VIRGINIA", "WISCONSIN", "WYOMING", "VIRTUAL",
+]
+
+# State display name -> 2 letter abbreviation for the state field.
+_APE_ABBR = {
+    "ALABAMA": "AL", "ALASKA": "AK", "ARIZONA": "AZ", "ARKANSAS": "AR",
+    "CALIFORNIA": "CA", "COLORADO": "CO", "CONNECTICUT": "CT", "DELAWARE": "DE",
+    "DISTRICT-OF-COLUMBIA": "DC", "FLORIDA": "FL", "GEORGIA": "GA", "HAWAII": "HI",
+    "IDAHO": "ID", "ILLINOIS": "IL", "INDIANA": "IN", "IOWA": "IA", "KANSAS": "KS",
+    "KENTUCKY": "KY", "LOUISIANA": "LA", "MAINE": "ME", "MARYLAND": "MD",
+    "MASSACHUSETTS": "MA", "MICHIGAN": "MI", "MINNESOTA": "MN", "MISSISSIPPI": "MS",
+    "MISSOURI": "MO", "MONTANA": "MT", "NEBRASKA": "NE", "NEVADA": "NV",
+    "NEW-HAMPSHIRE": "NH", "NEW-JERSEY": "NJ", "NEW-MEXICO": "NM", "NEW-YORK": "NY",
+    "NORTH-CAROLINA": "NC", "NORTH-DAKOTA": "ND", "OHIO": "OH", "OKLAHOMA": "OK",
+    "OREGON": "OR", "PENNSYLVANIA": "PA", "RHODE-ISLAND": "RI",
+    "SOUTH-CAROLINA": "SC", "SOUTH-DAKOTA": "SD", "TENNESSEE": "TN", "TEXAS": "TX",
+    "UTAH": "UT", "VERMONT": "VT", "VIRGINIA": "VA", "WASHINGTON": "WA",
+    "WEST-VIRGINIA": "WV", "WISCONSIN": "WI", "WYOMING": "WY", "VIRTUAL": None,
+}
+
+_APE_LIVE = {"new", "available", "sale pending", "under offer"}
+
+
 def scrape_ape() -> List[Dict]:
-    out = []
-    page = fetch_via_api(
-        "https://www.accountingpracticeexchange.com/cpa-firms-for-sale",
-        render=True)
-    if not page:
-        log.info("ape: no page")
-        return out
-    rows = re.findall(r'<tr class="ant-table-row[^"]*"[^>]*>(.*?)</tr>', page, re.S)
-    for r in rows:
-        cells = re.findall(r'<td class="ant-table-cell">(.*?)</td>', r, re.S)
-        if len(cells) < 5:
+    import time as _time
+    out, seen = [], set()
+    for st in _APE_STATES:
+        url = f"https://www.accountingpracticeexchange.com/Sales/{st}"
+        page = fetch_via_api(url, render=True)
+        if not page:
             continue
+        rows = re.findall(r'<tr class="ant-table-row[^"]*"[^>]*>(.*?)</tr>', page, re.S)
 
         def clean(x):
             return re.sub(r'\s+', ' ', html.unescape(re.sub(r'<[^>]+>', '', x))).strip()
 
-        ref = clean(cells[0])
-        href = re.search(r'href="([^"]+)"', cells[0])
-        href = href.group(1) if href else ""
-        state = clean(cells[1])
-        loc = clean(cells[2])
-        gross_txt = clean(cells[3])
-        status_txt = clean(cells[4]).lower()
-        seller = clean(cells[5]) if len(cells) > 5 else ""
-        if not ref or not ref.isdigit():
-            continue
+        kept = 0
+        for r in rows:
+            cells = re.findall(r'<td class="ant-table-cell">(.*?)</td>', r, re.S)
+            if len(cells) < 5:
+                continue
+            ref = clean(cells[0])
+            if not ref.isdigit() or ref in seen:
+                continue
+            status_txt = clean(cells[4]).lower()
+            if status_txt not in _APE_LIVE:
+                continue                      # drop expired / sold
+            seen.add(ref)
+            kept += 1
+            row_state = clean(cells[1])
+            loc = clean(cells[2])
+            gross_txt = clean(cells[3])
+            seller = clean(cells[5]) if len(cells) > 5 else ""
+            href = re.search(r'href="([^"]+)"', cells[0])
+            href = href.group(1) if href else ""
 
-        rev = None
-        m = re.search(r'([\d,]{4,})', gross_txt)
-        if m:
-            rev = int(m.group(1).replace(",", ""))
+            rev = None
+            m = re.search(r'([\d,]{4,})', gross_txt)
+            if m:
+                rev = int(m.group(1).replace(",", ""))
 
-        status = ("sold" if "sold" in status_txt or "agreed" in status_txt
-                  else "pending" if ("pending" in status_txt or "under offer" in status_txt)
-                  else "active")
+            status = "pending" if "pending" in status_txt or "offer" in status_txt else "active"
+            state_abbr = (row_state.upper() if row_state and len(row_state) == 2
+                          else _APE_ABBR.get(st))
+            is_private = "private" in seller.lower()
+            note = "Private seller (FSBO)" if is_private else (("Listed via " + seller) if seller else "")
+            full_url = ("https://www.accountingpracticeexchange.com" + href) if href.startswith("/") \
+                else (href or f"https://www.accountingpracticeexchange.com/Sales/{st}/{ref}")
 
-        url = ("https://www.accountingpracticeexchange.com" + href) if href.startswith("/") \
-            else (href or f"https://www.accountingpracticeexchange.com/Sales/{state}/{ref}")
-
-        is_private = "private" in seller.lower()
-        note = "Private seller (FSBO)" if is_private else (("Listed via " + seller) if seller else "")
-
-        out.append(_base(
-            "ape", "Accounting Practice Exchange", url,
-            firm_type=clean_title((loc.title() + " Accounting Practice") if loc else "Accounting Practice"),
-            city=loc.title() if loc and loc.lower() != "virtual" else None,
-            state=(state.upper() if state and len(state) == 2 else _bbs_state(loc)),
-            revenue=rev,
-            description=(f"{loc}. {note}".strip(". ") or None),
-            services=services_from(loc + " " + seller),
-            status=status,
-            seller_note=note,
-            listing_code="APE-" + ref,
-        ))
-    log.info("ape: %s listings", len(out))
+            out.append(_base(
+                "ape", "Accounting Practice Exchange", full_url,
+                firm_type=clean_title((loc.title() + " Accounting Practice") if loc else "Accounting Practice"),
+                city=loc.title() if loc and loc.lower() != "virtual" else None,
+                state=state_abbr,
+                revenue=rev,
+                description=(f"{loc}. {note}".strip(". ") or None),
+                services=services_from(loc + " " + seller),
+                status=status,
+                seller_note=note,
+                listing_code="APE-" + ref,
+            ))
+        log.info("ape %s: %s live listings", st, kept)
+        _time.sleep(1)
+    log.info("ape: %s total live listings", len(out))
     return out
 
 
