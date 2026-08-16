@@ -1357,3 +1357,76 @@ def scrape_bbi() -> List[Dict]:
 ALL_SOURCES.update({
     "bbi": scrape_bbi,
 })
+
+
+# ----------------------------------------------------------------------
+# Accounting Practice Exchange  (accountingpracticeexchange.com)  aggregator
+# that carries both broker listings and private-seller (FSBO) deals. Server
+# rendered Next.js: the listings render into a clean table on the page, so a
+# render fetch returns them in HTML. Needs render=True. Most rows re-list
+# brokers we already scrape (ABA, Poe); dedupe collapses those and the unique
+# value is the Private Seller rows. Ref detail pages live at /Sales/<state>/<ref>.
+# ----------------------------------------------------------------------
+
+def scrape_ape() -> List[Dict]:
+    out = []
+    page = fetch_via_api(
+        "https://www.accountingpracticeexchange.com/cpa-firms-for-sale",
+        render=True)
+    if not page:
+        log.info("ape: no page")
+        return out
+    rows = re.findall(r'<tr class="ant-table-row[^"]*"[^>]*>(.*?)</tr>', page, re.S)
+    for r in rows:
+        cells = re.findall(r'<td class="ant-table-cell">(.*?)</td>', r, re.S)
+        if len(cells) < 5:
+            continue
+
+        def clean(x):
+            return re.sub(r'\s+', ' ', html.unescape(re.sub(r'<[^>]+>', '', x))).strip()
+
+        ref = clean(cells[0])
+        href = re.search(r'href="([^"]+)"', cells[0])
+        href = href.group(1) if href else ""
+        state = clean(cells[1])
+        loc = clean(cells[2])
+        gross_txt = clean(cells[3])
+        status_txt = clean(cells[4]).lower()
+        seller = clean(cells[5]) if len(cells) > 5 else ""
+        if not ref or not ref.isdigit():
+            continue
+
+        rev = None
+        m = re.search(r'([\d,]{4,})', gross_txt)
+        if m:
+            rev = int(m.group(1).replace(",", ""))
+
+        status = ("sold" if "sold" in status_txt or "agreed" in status_txt
+                  else "pending" if ("pending" in status_txt or "under offer" in status_txt)
+                  else "active")
+
+        url = ("https://www.accountingpracticeexchange.com" + href) if href.startswith("/") \
+            else (href or f"https://www.accountingpracticeexchange.com/Sales/{state}/{ref}")
+
+        is_private = "private" in seller.lower()
+        note = "Private seller (FSBO)" if is_private else (("Listed via " + seller) if seller else "")
+
+        out.append(_base(
+            "ape", "Accounting Practice Exchange", url,
+            firm_type=clean_title((loc.title() + " Accounting Practice") if loc else "Accounting Practice"),
+            city=loc.title() if loc and loc.lower() != "virtual" else None,
+            state=(state.upper() if state and len(state) == 2 else _bbs_state(loc)),
+            revenue=rev,
+            description=(f"{loc}. {note}".strip(". ") or None),
+            services=services_from(loc + " " + seller),
+            status=status,
+            seller_note=note,
+            listing_code="APE-" + ref,
+        ))
+    log.info("ape: %s listings", len(out))
+    return out
+
+
+ALL_SOURCES.update({
+    "ape": scrape_ape,
+})

@@ -29,7 +29,7 @@ SOURCE_PRIORITY = {
     "aba": 1, "naab": 1, "aps": 1, "poe": 1, "ppt": 1, "atb": 1,
     "prohorizons": 1, "padgett": 1, "abizbrokers": 1, "afs": 1, "bbi": 1,
     "businessesforsale": 5, "dealstream": 5, "bizbuysell": 5,
-    "bizquest": 5, "loopnet": 5, "karbon": 5,
+    "bizquest": 5, "loopnet": 5, "karbon": 5, "ape": 6,
 }
 
 # Sources that aggregate listings from many origins rather than originating them.
@@ -37,7 +37,7 @@ SOURCE_PRIORITY = {
 # is likely a direct-from-seller deal, and gets flagged as such for the frontend.
 MARKETPLACE_SOURCES = {
     "businessesforsale", "dealstream", "bizbuysell",
-    "bizquest", "loopnet", "karbon",
+    "bizquest", "loopnet", "karbon", "ape",
 }
 
 # A source must not lose more than this share of its listings in one run.
