@@ -1498,7 +1498,10 @@ ALL_SOURCES.update({
 # main category, so this only nets genuine strays. Ultra premium proxy.
 # ----------------------------------------------------------------------
 
-_BBS_KW_TERMS = ["CPA firm", "tax practice", "accounting practice", "bookkeeping business"]
+_BBS_KW_TERMS = [
+    "CPA", "accounting", "tax practice", "bookkeeping",
+    "CPA firm", "accounting practice", "tax preparation", "enrolled agent",
+]
 _BBS_ACCT_RE = re.compile(
     r'\b(CPA|accounting|tax practice|tax prep|bookkeep|enrolled agent|\bEA\b|accountant|payroll service|audit)\b',
     re.I)
