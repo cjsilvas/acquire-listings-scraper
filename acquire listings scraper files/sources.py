@@ -1486,3 +1486,80 @@ def scrape_ape() -> List[Dict]:
 ALL_SOURCES.update({
     "ape": scrape_ape,
 })
+
+
+# ----------------------------------------------------------------------
+# BizBuySell keyword sweep. The main bizbuysell scraper reads the official
+# "Accounting & Tax Practices" category, which is complete for correctly
+# categorized listings. This sweep catches practices a broker mis-filed under
+# a different category (Financial Services, Business Services, etc.) by running
+# targeted keyword searches and keeping only rows whose text is clearly an
+# accounting/tax/bookkeeping practice. Dedupe collapses anything already in the
+# main category, so this only nets genuine strays. Ultra premium proxy.
+# ----------------------------------------------------------------------
+
+_BBS_KW_TERMS = ["CPA firm", "tax practice", "accounting practice", "bookkeeping business"]
+_BBS_ACCT_RE = re.compile(
+    r'\b(CPA|accounting|tax practice|tax prep|bookkeep|enrolled agent|\bEA\b|accountant|payroll service|audit)\b',
+    re.I)
+
+
+def scrape_bizbuysell_keywords() -> List[Dict]:
+    import time as _time
+    out, seen = [], set()
+    for term in _BBS_KW_TERMS:
+        q = term.replace(" ", "+")
+        for pg in range(1, 4):  # first few pages per term; strays are rare
+            idx = f"https://www.bizbuysell.com/businesses-for-sale/?q={q}" + (f"&page={pg}" if pg > 1 else "")
+            page = fetch_via_api(idx, ultra=True)
+            if not page:
+                break
+            about = _bbs_about(page)
+            if not about:
+                break
+            added = 0
+            for entry in about:
+                p = entry.get("item", {})
+                url = p.get("url", "")
+                if not url or url in seen:
+                    continue
+                low_url = url.lower()
+                if "/business-opportunity/" not in low_url:
+                    continue
+                if any(j in low_url for j in (
+                        "/business-broker/", "/franchise-for-sale/", "/business-asset/",
+                        "/business-real-estate", "/start-up-business/")):
+                    continue
+                name = html.unescape(p.get("name") or "").strip()
+                desc = html.unescape(p.get("description") or "").strip()
+                if not _BBS_ACCT_RE.search(name + " " + desc):
+                    continue                       # not an accounting practice, skip
+                seen.add(url)
+                added += 1
+                blob = name + " | " + desc
+                rev = _ds_money(name) or _ds_money(desc)
+                low = blob.lower()
+                status = ("sold" if re.search(r"\bsold\b", low)
+                          else "pending" if re.search(r"under contract|sale pending", low)
+                          else "active")
+                out.append(_base(
+                    "bizbuysell", "BizBuySell", url,
+                    firm_type=clean_title(name),
+                    state=_bbs_state(name) or _bbs_state(desc),
+                    revenue=rev,
+                    description=desc[:1500] or None,
+                    services=services_from(blob),
+                    status=status,
+                    seller_note=seller_flag(blob),
+                    listing_code="BBS-" + url.rstrip("/").split("/")[-1],
+                ))
+            if added == 0:
+                break
+            _time.sleep(1)
+    log.info("bizbuysell_keywords: %s stray accounting listings", len(out))
+    return out
+
+
+ALL_SOURCES.update({
+    "bizbuysell_keywords": scrape_bizbuysell_keywords,
+})
