@@ -27,7 +27,7 @@ UA = "FoldListingsBot/1.0 (accounting practice aggregator; contact: cj@eagleeyee
 # Lower number wins during dedupe. Origin brokers beat marketplaces, always.
 SOURCE_PRIORITY = {
     "aba": 1, "naab": 1, "aps": 1, "poe": 1, "ppt": 1, "atb": 1,
-    "prohorizons": 1, "padgett": 1, "abizbrokers": 1,
+    "prohorizons": 1, "padgett": 1, "abizbrokers": 1, "afs": 1, "bbi": 1,
     "businessesforsale": 5, "dealstream": 5, "bizbuysell": 5,
     "bizquest": 5, "loopnet": 5, "karbon": 5,
 }
@@ -222,15 +222,51 @@ def deduplicate(listings: List[Dict]) -> List[Dict]:
     best: Dict[tuple, Dict] = {}
     dropped = 0
 
+    # Secondary index: same state + same asking price is a strong duplicate
+    # signal even when titles differ across sources (e.g. "WV" vs "West
+    # Virginia", or a marketplace re-titling a broker's listing).
+    by_price: Dict[tuple, tuple] = {}
+
     for item in listings:
         key = dedupe_key(item)
+
+        # Try the asking-price key first: (state, asking_price).
+        price_key = None
+        st = (item.get("state") or "").upper()
+        ap = item.get("asking_price")
+        if st and ap:
+            price_key = (st, int(ap))
+
         if not key[0] or key[1] is None or not key[2]:
-            best[("unique", item["fingerprint"])] = item      # not enough to match on
+            # Not enough to match on title, but an asking-price match still counts.
+            if price_key and price_key in by_price:
+                pk, incumbent = by_price[price_key]
+                dropped += 1
+                if _wins(item, incumbent):
+                    item["also_listed_at"] = sorted(
+                        set(incumbent.get("also_listed_at", []) + [incumbent["source"]])
+                    )
+                    best[pk] = item
+                    by_price[price_key] = (pk, item)
+                else:
+                    incumbent["also_listed_at"] = sorted(
+                        set(incumbent.get("also_listed_at", []) + [item["source"]])
+                    )
+                continue
+            uk = ("unique", item["fingerprint"])
+            best[uk] = item
+            if price_key:
+                by_price[price_key] = (uk, item)
             continue
 
         incumbent = best.get(key)
+        if incumbent is None and price_key and price_key in by_price:
+            # Title key is new, but asking price already matched something.
+            key, incumbent = by_price[price_key][0], by_price[price_key][1]
         if incumbent is None:
             best[key] = item
+            if price_key:
+                by_price[price_key] = (key, item)
             continue
 
         dropped += 1
@@ -239,6 +275,8 @@ def deduplicate(listings: List[Dict]) -> List[Dict]:
                 set(incumbent.get("also_listed_at", []) + [incumbent["source"]])
             )
             best[key] = item
+            if price_key:
+                by_price[price_key] = (key, item)
         else:
             incumbent["also_listed_at"] = sorted(
                 set(incumbent.get("also_listed_at", []) + [item["source"]])
@@ -449,3 +487,74 @@ def _days_between(a: str, b: str) -> int:
     da = datetime.fromisoformat(a.replace("Z", "+00:00"))
     dbb = datetime.fromisoformat(b.replace("Z", "+00:00"))
     return max(0, (dbb - da).days)
+
+
+def flag_db_duplicates() -> Dict:
+    """
+    Cross source dedupe at the database level, run after every sync.
+    Same firm listed on multiple sources becomes one visible row. The origin
+    broker always wins over a marketplace. Duplicates are hidden (is_duplicate
+    = true) and point at the survivor via duplicate_of, never deleted, so a
+    wrong match is fully reversible. Matching is conservative: same state and
+    revenue, plus either equal asking price or a near identical title. This is
+    what copy pasted broker summaries look like and avoids merging two
+    different firms that happen to share a metro and revenue.
+    """
+    rows = db.table("listings").select(
+        "id,source,revenue,state,asking_price,firm_type,is_duplicate"
+    ).eq("status", "active").execute().data or []
+
+    def pri(src: str) -> int:
+        return SOURCE_PRIORITY.get(src, 9)
+
+    def norm(t: Optional[str]) -> str:
+        return re.sub(r"[^a-z0-9 ]", "", (t or "").lower()).strip()
+
+    # Order so the preferred survivor is seen first within each group.
+    rows.sort(key=lambda r: (pri(r["source"]), r["source"], str(r["id"])))
+
+    survivors: List[Dict] = []
+    to_flag: Dict[str, str] = {}   # dup_id -> survivor_id
+
+    for r in rows:
+        if r.get("revenue") is None or not r.get("state"):
+            continue
+        rt = norm(r.get("firm_type"))
+        matched = None
+        for s in survivors:
+            if s["state"] != r["state"] or s["revenue"] != r["revenue"]:
+                continue
+            st = s["_t"]
+            same_price = (r.get("asking_price") is not None
+                          and r["asking_price"] == s.get("asking_price"))
+            same_title = bool(rt) and (
+                rt == st
+                or (len(rt) > 12 and (rt in st or st in rt))
+            )
+            if same_price or same_title:
+                matched = s
+                break
+        if matched is None:
+            r["_t"] = rt
+            survivors.append(r)
+        else:
+            to_flag[r["id"]] = matched["id"]
+
+    # Apply: flag the newly found duplicates, and clear any stale flags on
+    # rows that are now survivors (e.g. a higher priority copy disappeared).
+    flagged = 0
+    for dup_id, keep_id in to_flag.items():
+        db.table("listings").update(
+            {"is_duplicate": True, "duplicate_of": keep_id}
+        ).eq("id", dup_id).execute()
+        flagged += 1
+
+    survivor_ids = {s["id"] for s in survivors}
+    for r in rows:
+        if r["id"] in survivor_ids and r.get("is_duplicate"):
+            db.table("listings").update(
+                {"is_duplicate": False, "duplicate_of": None}
+            ).eq("id", r["id"]).execute()
+
+    log.info("db dedupe: %s active listings hidden as duplicates", flagged)
+    return {"duplicates_hidden": flagged}

@@ -52,10 +52,16 @@ def run(mode: str = "deep"):
         return {"ok": False, "reason": "all sources failed"}
 
     try:
-        from engine import deduplicate, flag_direct_sellers
+        from engine import deduplicate, flag_direct_sellers, flag_db_duplicates
         scraped = deduplicate(scraped)
         scraped = flag_direct_sellers(scraped)
         stats = sync(scraped, ran, first_ever_run=legacy)
+        # Cross source dedupe at the DB level, so the same firm from two
+        # sources shows once. Hides, never deletes. Never blocks the run.
+        try:
+            stats.update(flag_db_duplicates())
+        except Exception as e:
+            log.exception("db dedupe failed, listings still synced: %s", e)
     except Exception as e:
         # A failure here must not look like a healthy exit, but it also must not
         # take the container down. The next run will try again on fresh data.
