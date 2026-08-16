@@ -543,6 +543,38 @@ def scrape_bfs(max_pages: int = 6) -> List[Dict]:
         if not page:
             continue
         text = strip_tags(page)
+
+        # BusinessesForSale renders the real listing data (full description,
+        # country/region, prices) inside JSON-LD script blocks, not visible
+        # HTML. Parse those first; fall back to page text where absent.
+        ld = {}
+        for blk in re.findall(
+                r'<script[^>]*type=["\']application/(?:ld\+json|json)["\'][^>]*>(.*?)</script>',
+                page, re.S):
+            try:
+                obj = json.loads(blk.strip())
+            except Exception:
+                continue
+            cands = obj if isinstance(obj, list) else [obj]
+            for c in cands:
+                if isinstance(c, dict) and (c.get("description") or c.get("offers") or c.get("makesOffer")):
+                    for k, v in c.items():
+                        ld.setdefault(k, v)
+        ld_desc = ld.get("description") if isinstance(ld.get("description"), str) else None
+        ld_region = None
+        addr = ld.get("address")
+        if isinstance(addr, dict):
+            ld_region = addr.get("addressRegion") or addr.get("addressLocality")
+        ld_price = None
+        offers = ld.get("offers") or ld.get("makesOffer")
+        if isinstance(offers, dict):
+            p = offers.get("price") or (offers.get("priceSpecification") or {}).get("price")
+            if p:
+                try:
+                    ld_price = int(re.sub(r"[^\d]", "", str(p)))
+                except (ValueError, TypeError):
+                    ld_price = None
+
         title = re.search(r"<title>([^<]*)", page)
         title = title.group(1).split("|")[0] if title else ""
         low = text.lower()
@@ -573,12 +605,17 @@ def scrape_bfs(max_pages: int = 6) -> List[Dict]:
             firm_type=clean_title(title),
             state=state_deep(title, text[:1500]),
             revenue=num("(?:gross )?revenue|turnover|sales"),
-            asking_price=num("asking price"),
+            asking_price=num("asking price") or ld_price,
             cash_flow=num("cash flow|net profit"),
-            description=best_description(text),
-            services=services_from(title + " " + text[:600]),
+            description=(ld_desc.strip()[:1500] if ld_desc else best_description(text)),
+            services=services_from(title + " " + (ld_desc or text[:600])),
             status=status,
         )
+        # Prefer the JSON-LD region for state when the text parse missed it.
+        if not item.get("state") and ld_region:
+            st = _bbs_state(ld_region) or state_from(ld_region)
+            if st:
+                item["state"] = st
         # The marketplace names the actual listing firm: "Listed by X"
         lb = re.search(r"Listed by:?\s+([A-Z][A-Za-z0-9&.,' -]{2,60}?)(?:\s{2,}|\.\s|$|Asking|Sales Revenue|Contact)", text)
         if lb:
