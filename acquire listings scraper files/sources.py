@@ -1135,7 +1135,21 @@ def scrape_bizbuysell(deep: bool = False) -> List[Dict]:
                 if m and m.group(1) in ABBR:
                     item["state"] = m.group(1)
 
-    log.info("bizbuysell: %s listings (deep=%s)", len(out), deep)
+            # "Listed By" is BizBuySell's own broker/agent field, the
+            # authoritative signal for who is selling: a broker hyperlink whose
+            # URL carries the brokerage slug, or an owner sale. Far more reliable
+            # than guessing from the description.
+            mb = re.search(
+                r'ContactBrokerNameHyperLink"[^>]*href="(/business-broker/[^"]+)"[^>]*>([^<]+)</a>',
+                detail)
+            if mb:
+                href, agent = mb.group(1), html.unescape(mb.group(2)).strip()
+                item["agent_name"] = agent[:120]
+                parts = [p for p in href.split("/") if p]
+                if len(parts) >= 3:
+                    item["listing_brokerage"] = parts[2].replace("-", " ").title()[:120]
+            elif re.search(r"for sale by owner|listed by owner|sale by the owner", dtext, re.I):
+                item["seller_note"] = "Listed by owner (direct seller)"
     return out
 
 
