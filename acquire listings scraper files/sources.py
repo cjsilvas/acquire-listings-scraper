@@ -58,6 +58,20 @@ def services_from(text: str) -> List[str]:
     return out or ["Accounting"]
 
 
+_ACCT_TERMS_RE = re.compile(
+    r'(CPA|account|bookkeep|\btax\b|enrolled agent|\bEA\b|audit|payroll|'
+    r'\bCAS\b|\bCAAS\b|\bCFO\b|fiduciary|advisory|controller|wealth|'
+    r'financial planning|financial services|comptable|fp&a|tax resolution)',
+    re.I)
+
+
+def _is_accounting(text: str) -> bool:
+    """True if the listing text reads as an accounting/tax/bookkeeping firm.
+    Used to keep marketplace category pages (BizQuest especially) from
+    injecting unrelated franchises and businesses."""
+    return bool(_ACCT_TERMS_RE.search(text or ""))
+
+
 def clean_title(t: str) -> str:
     t = html.unescape(t or "")
     t = re.sub(r"[\u2013\u2014]", " ", t)
@@ -1230,6 +1244,11 @@ def scrape_bizquest(deep: bool = False) -> List[Dict]:
             name = html.unescape(p.get("name") or "").strip()
             desc = html.unescape(p.get("description") or "").strip()
             blob = name + " | " + desc
+            # BizQuest's "cpa-firms" category is polluted with unrelated
+            # franchises (Drybar, pet resorts, roofing, etc.). Keep only rows
+            # whose text actually reads as an accounting/tax/bookkeeping firm.
+            if not _is_accounting(blob):
+                continue
             rev = _ds_money(name) or _ds_money(desc)
             low = blob.lower()
             status = ("sold" if re.search(r"\bsold\b", low)
