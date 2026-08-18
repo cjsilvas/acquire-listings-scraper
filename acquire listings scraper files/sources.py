@@ -1603,3 +1603,93 @@ def scrape_bizbuysell_keywords() -> List[Dict]:
 ALL_SOURCES.update({
     "bizbuysell_keywords": scrape_bizbuysell_keywords,
 })
+
+
+# ----------------------------------------------------------------------
+# Professional Accounting Sales  (cpasales.com)  a dedicated CPA/EA practice
+# broker, 40+ years, that does NOT repost to BizBuySell, so its live listings
+# are exclusive inventory. The site is Wix: each regional page embeds a Wix
+# "Table Master" whose data comes from a wix-visual-data endpoint. That table
+# is Location, Status, Sales Price, with a "RECENT SALES:" divider; rows above
+# the divider are live, rows below are sold history. We keep only the live ones.
+# Two step fetch per region: render the region page to recover its data URL,
+# then fetch that URL for the table.
+# ----------------------------------------------------------------------
+
+_PAS_REGIONS = {
+    "practices-texas": "TX", "practices-florida": "FL", "practices-arizona": "AZ",
+    "practices-carolinas": None, "practices-atlanta-area": "GA",
+    "practices-new-england": None, "practices-mid-atlantic": None,
+    "practices-northeast": None, "practices-southeast": None,
+    "practices-west-coast": None, "midwest-practices": None,
+    "northwest-practices": None,
+}
+
+_PAS_LIVE = re.compile(
+    r'(Proposals Pending|Now Available|Available|Sale Pending|Under Contract|Pending)',
+    re.I)
+
+
+def scrape_pas() -> List[Dict]:
+    import time as _time
+    out, seen = [], set()
+    for region, region_state in _PAS_REGIONS.items():
+        page = fetch_via_api(f"https://www.cpasales.com/{region}", render=True)
+        if not page:
+            continue
+        m = re.search(r'"(https://wix-visual-data\.appspot\.com/index\?[^"]+)"', page)
+        if not m:
+            continue
+        data_url = html.unescape(m.group(1))
+        data = fetch_via_api(data_url)
+        if not data:
+            continue
+
+        # Only the portion before "RECENT SALES" is live inventory.
+        head = data.split("RECENT SALES")[0]
+
+        for pm in re.finditer(
+                r'(Proposals Pending|Now Available|Available|Sale Pending|Under Contract|Pending)'
+                r',\\*"?\$([\d,]{4,})', head, re.I):
+            status_txt = pm.group(1).lower()
+            price = int(pm.group(2).replace(",", ""))
+
+            # Nearest preceding PageLink text is the location label.
+            before = head[:pm.start()]
+            loc = None
+            for tm in re.finditer(r'"text\\+":\\+"([^\\"]{2,50})', before):
+                loc = tm.group(1)
+            loc = (loc or "").strip() or None
+
+            # Stable id: region + price (PAS refs aren't exposed in the table).
+            key = f"{region}:{price}"
+            if key in seen:
+                continue
+            seen.add(key)
+
+            status = "pending" if ("pending" in status_txt or "proposal" in status_txt
+                                   or "offer" in status_txt or "contract" in status_txt) else "active"
+            state = region_state or (_bbs_state(loc) if loc else None)
+
+            out.append(_base(
+                "pas", "Professional Accounting Sales",
+                f"https://www.cpasales.com/{region}",
+                firm_type=clean_title((loc + " Accounting Practice") if loc else "Accounting Practice"),
+                city=loc,
+                state=state,
+                asking_price=price,
+                description=(f"{loc}. Listed by Professional Accounting Sales.".strip(". ")
+                             if loc else "Listed by Professional Accounting Sales."),
+                services=None,
+                status=status,
+                seller_note="Listed via Professional Accounting Sales (specialist CPA broker)",
+                listing_code="PAS-" + region.replace("practices-", "").replace("-practices", "").upper()[:6] + "-" + str(price)[:4],
+            ))
+        _time.sleep(1)
+    log.info("pas: %s live listings", len(out))
+    return out
+
+
+ALL_SOURCES.update({
+    "pas": scrape_pas,
+})
