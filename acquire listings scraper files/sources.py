@@ -527,7 +527,7 @@ def scrape_bfs(max_pages: int = 6) -> List[Dict]:
         # Pagination on this site is a suffix: ...for-sale, ...for-sale-2, ...for-sale-3
         idx = ("https://us.businessesforsale.com/us/search/accountancy-practices-for-sale"
                + ("" if p == 1 else f"-{p}"))
-        page = fetch(idx)
+        page = fetch_via_api(idx)
         if not page:
             break
         found = set(re.findall(
@@ -539,7 +539,7 @@ def scrape_bfs(max_pages: int = 6) -> List[Dict]:
         urls |= found
     out = []
     for url in sorted(urls):
-        page = fetch(url)
+        page = fetch_via_api(url)
         if not page:
             continue
         text = strip_tags(page)
