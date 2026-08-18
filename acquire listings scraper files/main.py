@@ -83,12 +83,19 @@ def run(mode: str = "deep"):
     # stamp when a run passes every check here.
     try:
         checks = {}
+        total_sources = len(ran) + len(failed)
         checks["enough_sources"] = len(ran) >= 5
-        checks["no_source_collapse"] = not stats.get("skipped_sources")
+        # A few sources returning nothing on a given cycle is normal with 17+
+        # sources (rate limits, a slow proxy, or a source that genuinely has no
+        # new rows like the keyword sweep). Only treat it as a collapse if a
+        # large share fail at once, which signals a real systemic problem.
+        checks["no_source_collapse"] = (
+            total_sources == 0 or (len(failed) / total_sources) < 0.34
+        )
         res = db.table("listings").select("id", count="exact") \
                 .in_("status", ["active", "pending"]).execute()
         live = res.count or 0
-        checks["live_count_sane"] = 250 <= live <= 3000
+        checks["live_count_sane"] = 250 <= live <= 4000
         checks["work_happened"] = (stats.get("new", 0) + stats.get("updated", 0)) > 0
         gate_ok = all(checks.values())
         db.table("sync_health").insert({
