@@ -117,7 +117,11 @@ def run(mode: str = "deep"):
 
 
 if __name__ == "__main__":
-    result = run(sys.argv[1] if len(sys.argv) > 1 else "deep")
+    # Default to "light" so the frequent cron (every few hours) does cheap fetches
+    # only. Deep mode re-reads every detail page through ultra_premium (~25 credits
+    # each) and must NOT run on every cron tick or it drains the monthly quota in
+    # days. Run deep on its own low-frequency schedule with: python main.py deep
+    result = run(sys.argv[1] if len(sys.argv) > 1 else "light")
     # Exit clean whenever any real work happened. Railway should only flag a run
     # as crashed when the scraper genuinely accomplished nothing.
     sys.exit(0 if result.get("ok") else 1)

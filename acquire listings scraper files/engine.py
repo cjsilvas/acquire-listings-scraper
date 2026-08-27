@@ -147,9 +147,13 @@ def url_is_gone(url: str, via_api: bool = False) -> Optional[bool]:
     for attempt in range(2):
         try:
             if via_api and SCRAPER_API_KEY:
+                # A liveness check only needs the HTTP status code (404 vs 200), so we
+                # use a standard 1 credit request, NOT ultra_premium (which costs ~25
+                # credits per call). Checking hundreds of listings every run through
+                # ultra_premium is what previously burned the entire monthly quota.
                 r = requests.get(
                     "https://api.scraperapi.com/",
-                    params={"api_key": SCRAPER_API_KEY, "url": url, "ultra_premium": "true"},
+                    params={"api_key": SCRAPER_API_KEY, "url": url},
                     timeout=90,
                 )
             else:
