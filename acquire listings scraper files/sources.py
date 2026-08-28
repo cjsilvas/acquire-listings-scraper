@@ -1018,10 +1018,17 @@ def _bbs_about(page):
 def _bbs_state(text):
     if not text:
         return None
+    # Trust an explicit "City, ST" abbreviation pattern first.
     m = re.search(r",\s*([A-Z]{2})\b", text)
     if m and m.group(1) in ABBR:
         return m.group(1)
-    return state_from(text)
+    # Fall back to a spelled-out state name ONLY when the text is short (a title
+    # or location line). Scanning a long description for any state name is unsafe:
+    # descriptions often mention several states ("also serving Mississippi"), which
+    # caused correct listings (e.g. Seattle WA) to be mis-tagged to the wrong state.
+    if len(text) <= 60:
+        return state_from(text)
+    return None
 
 
 # Current year used to judge staleness. BizBuySell never publishes a listing date,
