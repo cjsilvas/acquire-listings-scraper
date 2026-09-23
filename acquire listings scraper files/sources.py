@@ -202,14 +202,16 @@ def scrape_aba() -> List[Dict]:
 # ----------------------------------------------------------------------
 
 def scrape_naab() -> List[Dict]:
-    index = fetch("https://www.naabconsulting.com/practices-for-sale/")
+    # Naab blocks datacenter IPs with a 403 (it answers this Mac fine but not
+    # Railway), so both the index and the detail pages go through the proxy.
+    index = fetch_via_api("https://www.naabconsulting.com/practices-for-sale/")
     if not index:
         return []
     urls = sorted(set(re.findall(
         r'href="(https://www\.naabconsulting\.com/practice-listing/[^"#?]+)"', index)))
     out = []
     for url in urls:
-        page = fetch(url)
+        page = fetch_via_api(url)
         if not page:
             continue
         text = strip_tags(page)
@@ -914,15 +916,19 @@ def scrape_dealstream(deep: bool = False) -> List[Dict]:
     gaps from detail pages, and even then we go slowly and cap the count.
     """
     out, seen = [], set()
+    ds_misses = 0
     import time as _time
     for pg in range(1, 10):
         idx = "https://dealstream.com/accounting-practices-for-sale" + (f"/{pg}" if pg > 1 else "")
-        page = fetch_via_api(idx)
-        if not page:
-            break
-        srp = _ds_ldjson(page, "SearchResultsPage")
+        page = fetch_via_api(idx) or fetch_via_api(idx, premium=True)
+        srp = _ds_ldjson(page, "SearchResultsPage") if page else None
         if not srp or not srp.get("about"):
-            break
+            ds_misses += 1
+            log.warning("dealstream: page %s came back empty (miss %s)", pg, ds_misses)
+            if ds_misses >= 3:
+                break
+            _time.sleep(2)
+            continue
         new = 0
         for a in srp["about"]:
             it = a.get("item", {})
@@ -1225,15 +1231,22 @@ ALL_SOURCES.update({
 
 def scrape_bizquest(deep: bool = False) -> List[Dict]:
     out, seen = [], set()
+    misses = 0
     import time as _time
     for pg in range(1, 12):
         idx = "https://www.bizquest.com/cpa-firms-for-sale/" + (f"page-{pg}/" if pg > 1 else "")
-        page = fetch_via_api(idx)
-        if not page:
-            break
-        about = _bbs_about(page)
+        page = fetch_via_api(idx) or fetch_via_api(idx, premium=True)
+        about = _bbs_about(page) if page else None
         if not about:
-            break
+            # A single flaky page used to break the loop, which returned far
+            # fewer rows than the database held, which tripped the collapse
+            # guard, which discarded BizQuest entirely. It sat 20 days stale.
+            misses += 1
+            log.warning("bizquest: page %s came back empty (miss %s)", pg, misses)
+            if misses >= 3:
+                break
+            _time.sleep(2)
+            continue
         new = 0
         for entry in about:
             p = entry.get("item", {})

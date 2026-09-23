@@ -17,6 +17,110 @@ logging.basicConfig(level=logging.INFO,
 log = logging.getLogger("fold.main")
 
 
+STALE_HOURS = 24            # a source with no fresh row in a day has gone dark
+ALERT_COOLDOWN_HOURS = 20   # tell CJ once a day, not once a run
+
+
+def _parse_ts(value: str):
+    """
+    Postgres hands back fractional seconds with however many digits it feels
+    like ("...03.5356+00:00"), and datetime.fromisoformat on Python 3.9 only
+    accepts 3 or 6. Pad it, or the check silently skips that source.
+    """
+    from datetime import datetime
+    import re as _re
+    if not value:
+        return None
+    v = value.strip().replace("Z", "+00:00")
+    m = _re.match(r"^(.*\.)(\d{1,6})(.*)$", v)
+    if m:
+        v = m.group(1) + m.group(2).ljust(6, "0") + m.group(3)
+    try:
+        return datetime.fromisoformat(v)
+    except ValueError:
+        return None
+
+
+def _setting(key: str):
+    try:
+        r = db.table("private_settings").select("value").eq("key", key).limit(1).execute()
+        return (r.data or [{}])[0].get("value")
+    except Exception:
+        return None
+
+
+def alert_on_stale_sources():
+    """
+    Email CJ when a source stops producing fresh listings.
+
+    Every quality check can pass while one broker quietly goes dark: the run
+    still scrapes 15 other sources, the live count stays sane, and the gate
+    says ok. BizQuest sat 20 days stale that way and nobody heard about it.
+    This looks at the data itself, not at whether the run threw an error.
+    """
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    stale = []
+    for src in ALL_SOURCES:
+        try:
+            r = (db.table("listings").select("last_seen")
+                   .eq("source", src).order("last_seen", desc=True).limit(1).execute())
+            rows = r.data or []
+            if not rows or not rows[0].get("last_seen"):
+                # A source with no rows at all is not a source that went dark.
+                # The keyword sweeps file their finds under the parent source.
+                continue
+            seen = _parse_ts(rows[0]["last_seen"])
+            if seen is None:
+                log.warning("could not read last_seen for %s: %r", src, rows[0]["last_seen"])
+                continue
+            hrs = (now - seen).total_seconds() / 3600.0
+            if hrs >= STALE_HOURS:
+                stale.append((src, int(hrs)))
+        except Exception as e:
+            log.warning("staleness check failed for %s: %s", src, e)
+    if not stale:
+        return []
+
+    log.error("STALE SOURCES, no fresh listings in %sh: %s", STALE_HOURS, stale)
+
+    last = _setting("last_stale_alert_at")
+    if last:
+        when = _parse_ts(last)
+        if when is not None and (now - when).total_seconds() / 3600.0 < ALERT_COOLDOWN_HOURS:
+            return stale
+
+    key = _setting("resend_api_key")
+    if not key or key == "PASTE_KEY_HERE":
+        return stale
+
+    items = "".join(
+        "<li><b>%s</b>: %s</li>" % (src, "never seen" if hrs is None else "%s hours since a fresh listing" % hrs)
+        for src, hrs in stale)
+    html_body = (
+        "<p>These listing sources have gone quiet. Their listings still show on the site, "
+        "but nothing has verified them recently, so any that sold or were pulled still look live.</p>"
+        "<ul>" + items + "</ul>"
+        "<p>Automatic alert from the Practices scraper.</p>")
+    try:
+        import requests
+        requests.post(
+            "https://api.resend.com/emails",
+            headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"},
+            json={"from": "Practices Scraper <feedback@acquireafirm.com>",
+                  "to": ["cj@eagleeyeequity.com"],
+                  "reply_to": "cj@eagleeyeequity.com",
+                  "subject": "Practices: %s listing source(s) went dark" % len(stale),
+                  "html": html_body},
+            timeout=30)
+        db.table("private_settings").upsert(
+            {"key": "last_stale_alert_at", "value": now.isoformat()}).execute()
+        log.info("stale source alert emailed for %s source(s)", len(stale))
+    except Exception as e:
+        log.warning("could not send stale source alert: %s", e)
+    return stale
+
+
 def first_ever_run() -> bool:
     res = db.table("listings").select("id").limit(1).execute()
     return not (res.data or [])
@@ -109,6 +213,11 @@ def run(mode: str = "deep"):
             log.error("QUALITY GATE FAILED: %s", checks)
     except Exception as e:
         log.exception("could not record sync health: %s", e)
+
+    try:
+        stats["stale_sources"] = alert_on_stale_sources()
+    except Exception as e:
+        log.warning("stale source check failed: %s", e)
 
     stats["ok"] = True
     stats["sources_ok"] = ran
