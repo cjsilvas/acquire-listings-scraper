@@ -337,7 +337,7 @@ def _existing_by_fingerprint() -> Dict[str, Dict]:
     while True:
         res = (db.table("listings")
                  .select("id,fingerprint,source,status,first_seen,last_seen,"
-                         "is_legacy,days_on_market,miss_count")
+                         "is_legacy,days_on_market,miss_count,is_duplicate")
                  .range(page * size, page * size + size - 1)
                  .execute())
         batch = res.data or []
@@ -360,8 +360,15 @@ def sync(scraped: List[Dict], sources_run: List[str], first_ever_run: bool) -> D
     # --- guard against a broken parser wiping a source ---
     healthy_sources = []
     for src in sources_run:
+        # Count only rows this source still owns on the site. Cross-source
+        # duplicates are hidden copies of another broker's listing, so counting
+        # them made the "did the parser break?" maths impossible to pass:
+        # BizQuest held 332 real rows plus 252 hidden duplicates, a scrape of
+        # ~300 unique listings looked like a 50% collapse, and the source was
+        # discarded every run for 25 days with no way to recover.
         was = sum(1 for r in existing.values()
-                  if r["source"] == src and r["status"] in ("active", "pending"))
+                  if r["source"] == src and r["status"] in ("active", "pending")
+                  and not r.get("is_duplicate"))
         now_count = sum(1 for l in scraped if l["source"] == src)
         if was >= 10 and now_count < was * COLLAPSE_THRESHOLD:
             log.error("SOURCE COLLAPSE %s: had %s, got %s. Discarding this source.",
