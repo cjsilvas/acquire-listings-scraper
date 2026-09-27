@@ -7,7 +7,8 @@ Adding a broker means adding one function here and one line in ALL_SOURCES.
 
 import json, re, html, logging
 from typing import List, Dict, Optional
-from engine import fetch, fetch_via_api, fingerprint
+from engine import (fetch, fetch_via_api, fingerprint,
+                    should_fetch_detail, note_detail_fetched)
 
 log = logging.getLogger("fold.sources")
 
@@ -1024,8 +1025,14 @@ def scrape_dealstream(deep: bool = False) -> List[Dict]:
                 break
             if item["revenue"] is not None and item["asking_price"] is not None:
                 continue
+            # Skip pages we have already opened inside the refresh window. This is
+            # the whole saving: re-reading a listing that has no published asking
+            # price costs the same as reading a new one and teaches us nothing.
+            if not should_fetch_detail(item["source_url"]):
+                continue
             detail = fetch_via_api(item["source_url"])
             _time.sleep(1.5)
+            note_detail_fetched(item["source_url"])
             if not detail:
                 continue
             filled += 1
@@ -1243,8 +1250,14 @@ def scrape_bizbuysell(deep: bool = False) -> List[Dict]:
             if (item["revenue"] is not None and item["state"] is not None
                     and item.get("asking_price") is not None):
                 continue
+            # Skip pages we have already opened inside the refresh window. This is
+            # the whole saving: re-reading a listing that has no published asking
+            # price costs the same as reading a new one and teaches us nothing.
+            if not should_fetch_detail(item["source_url"]):
+                continue
             detail = fetch_via_api(item["source_url"], ultra=True)
             _time.sleep(1)
+            note_detail_fetched(item["source_url"])
             if not detail:
                 continue
             filled += 1
@@ -1364,8 +1377,14 @@ def scrape_bizquest(deep: bool = False) -> List[Dict]:
             if (item["revenue"] is not None and item["state"] is not None
                     and item.get("asking_price") is not None):
                 continue
+            # Skip pages we have already opened inside the refresh window. This is
+            # the whole saving: re-reading a listing that has no published asking
+            # price costs the same as reading a new one and teaches us nothing.
+            if not should_fetch_detail(item["source_url"]):
+                continue
             detail = fetch_via_api(item["source_url"])
             _time.sleep(1)
+            note_detail_fetched(item["source_url"])
             if not detail:
                 continue
             filled += 1

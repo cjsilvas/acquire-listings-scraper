@@ -9,7 +9,7 @@ What one run does:
 """
 
 import os, re, time, hashlib, logging
-from datetime import datetime, timezone, date
+from datetime import datetime, timezone, date, timedelta
 from typing import List, Dict, Optional
 
 import requests
@@ -326,6 +326,109 @@ def _richness(x: Dict) -> int:
     if x.get("description") and len(x["description"]) > 400:
         score += 1
     return score
+
+
+# ----------------------------------------------------------------------
+# Detail-page budget
+# ----------------------------------------------------------------------
+# Opening a listing's own page is where the money goes: BizBuySell details cost
+# roughly 30 ScraperAPI credits each and the old code re-read up to 250 of them
+# on every single run. Most of those re-reads learned nothing, because 61% of
+# listings simply have no published asking price and never will.
+#
+# So we remember when each detail page was last read. A page is re-read only if
+# we have never read it, or if the refresh window has passed. New listings still
+# get their revenue and asking price on the very next run, which is the thing
+# that actually matters to someone browsing the board.
+
+DETAIL_REFRESH_DAYS = 7      # re-read an already-seen listing at most this often
+DETAIL_FETCH_CAP = 120       # hard ceiling on detail fetches per run, all sources
+
+_detail_seen: Dict[str, str] = {}   # source_url -> ISO timestamp of last read
+_detail_touched: set = set()        # source_urls read during this run
+_detail_budget = DETAIL_FETCH_CAP
+
+
+def load_detail_checked() -> int:
+    """Read when each listing's detail page was last opened. Called once per run."""
+    global _detail_seen, _detail_touched, _detail_budget
+    _detail_seen, _detail_touched, _detail_budget = {}, set(), DETAIL_FETCH_CAP
+    page, size = 0, 1000
+    while True:
+        res = (db.table("listings")
+                 .select("source_url,detail_checked_at")
+                 .range(page * size, page * size + size - 1)
+                 .execute())
+        batch = res.data or []
+        for r in batch:
+            if r.get("source_url"):
+                _detail_seen[r["source_url"]] = r.get("detail_checked_at")
+        if len(batch) < size:
+            break
+        page += 1
+    never = sum(1 for v in _detail_seen.values() if not v)
+    log.info("detail memory: %s listings known, %s never checked", len(_detail_seen), never)
+    return len(_detail_seen)
+
+
+def should_fetch_detail(source_url: Optional[str]) -> bool:
+    """True if this listing's page is worth opening on this run."""
+    global _detail_budget
+    if not source_url or _detail_budget <= 0:
+        return False
+    last = _detail_seen.get(source_url, "MISSING")
+    if last == "MISSING":
+        return True              # brand new listing, always worth one read
+    if not last:
+        return True              # known listing that has never been read
+    seen = _detail_parse_ts(last)
+    if seen is None:
+        return True              # unreadable timestamp, treat as never checked
+    return (datetime.now(timezone.utc) - seen) > timedelta(days=DETAIL_REFRESH_DAYS)
+
+
+def _detail_parse_ts(raw: str) -> Optional[datetime]:
+    """Postgres hands back 4-6 digit fractional seconds; fromisoformat only takes
+    3 or 6. Trim the fraction rather than let a parse error silently re-fetch
+    every page, which is exactly the bill we are trying to cut."""
+    if not raw:
+        return None
+    t = raw.strip().replace("Z", "+00:00")
+    m = re.match(r"^(.*\.\d{1,6})\d*([+-]\d{2}:?\d{2})?$", t)
+    if m:
+        t = m.group(1) + (m.group(2) or "")
+    for attempt in (t, t.split(".")[0] + (m.group(2) if m and m.group(2) else "")):
+        try:
+            d = datetime.fromisoformat(attempt)
+            return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
+        except Exception:
+            continue
+    return None
+
+
+def note_detail_fetched(source_url: Optional[str]) -> None:
+    """Record that we opened this page, whether or not it told us anything."""
+    global _detail_budget
+    if source_url:
+        _detail_touched.add(source_url)
+        _detail_budget -= 1
+
+
+def flush_detail_checked() -> int:
+    """Stamp every page we opened this run, so it is not opened again next run."""
+    if not _detail_touched:
+        return 0
+    now = datetime.now(timezone.utc).isoformat()
+    urls, done = list(_detail_touched), 0
+    for i in range(0, len(urls), 100):
+        chunk = urls[i:i + 100]
+        try:
+            db.table("listings").update({"detail_checked_at": now}).in_("source_url", chunk).execute()
+            done += len(chunk)
+        except Exception as e:
+            log.warning("could not stamp detail_checked_at for %s urls: %s", len(chunk), e)
+    log.info("detail pages opened this run: %s", done)
+    return done
 
 
 # ----------------------------------------------------------------------

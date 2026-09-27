@@ -9,7 +9,7 @@ Two speeds, so we find new deals fast without hammering the brokers:
   python main.py deep
 """
 import sys, logging, time
-from engine import sync, db
+from engine import sync, db, load_detail_checked, flush_detail_checked
 from sources import ALL_SOURCES
 
 logging.basicConfig(level=logging.INFO,
@@ -132,6 +132,14 @@ def run(mode: str = "deep"):
     if legacy:
         log.info("First run. Everything found is tagged Legacy, true age unknown.")
 
+    # Load when each listing's detail page was last opened, so the scrapers can
+    # skip pages they already read. Without this a run re-reads hundreds of
+    # unchanged pages at ultra-premium rates.
+    try:
+        load_detail_checked()
+    except Exception as e:
+        log.warning("could not load detail history, this run may re-read pages: %s", e)
+
     scraped, ran = [], []
     for name, fn in ALL_SOURCES.items():
         try:
@@ -160,6 +168,11 @@ def run(mode: str = "deep"):
         scraped = deduplicate(scraped)
         scraped = flag_direct_sellers(scraped)
         stats = sync(scraped, ran, first_ever_run=legacy)
+        # Stamp the pages we opened, so the next run skips them.
+        try:
+            stats["details_read"] = flush_detail_checked()
+        except Exception as e:
+            log.warning("could not record which detail pages were read: %s", e)
         # Cross source dedupe at the DB level, so the same firm from two
         # sources shows once. Hides, never deletes. Never blocks the run.
         try:
