@@ -1136,8 +1136,19 @@ def scrape_bizbuysell(deep: bool = False) -> List[Dict]:
             # sales, and start-ups. These are not accounting practices for sale and
             # were polluting the feed.
             low_url = url.lower()
+            low_name = (p.get("name") or "").lower()
+            # BizQuest files franchise ads under the CPA category. Their URLs read
+            # "/woof-gang-bakery-and-grooming-franchise-for-sale/", with no leading
+            # slash before "franchise", so the old "/franchise-for-sale/" test never
+            # matched and twelve pet groomers and mosquito sprayers reached the site.
+            is_franchise_ad = "franchise-for-sale" in low_url
+            keeps_accounting_name = any(w in low_name for w in
+                                        ("cpa", "account", "tax", "bookkeep", "audit", "payroll"))
+            if is_franchise_ad and not keeps_accounting_name:
+                seen.add(url)
+                continue
             if any(j in low_url for j in (
-                    "/business-broker/", "/franchise-for-sale/", "/business-asset/",
+                    "/business-broker/", "/business-asset/",
                     "/business-real-estate", "/start-up-business/")):
                 seen.add(url)
                 continue
