@@ -5,7 +5,7 @@ The engine handles everything else.
 Adding a broker means adding one function here and one line in ALL_SOURCES.
 """
 
-import re, html, logging
+import json, re, html, logging
 from typing import List, Dict, Optional
 from engine import fetch, fetch_via_api, fingerprint
 
@@ -495,55 +495,87 @@ def scrape_ppt() -> List[Dict]:
 # Accounting and Tax Brokerage (atbcal.com)   California focused
 # ----------------------------------------------------------------------
 
-ATB_INDEXES = [
-    "https://atbcal.com/category/listing-posts/california/northern-california/",
-    "https://atbcal.com/category/listing-posts/california/central-california/",
-    "https://atbcal.com/category/listing-posts/california/southern-california/",
-    "https://www.atbcal.com/listings_detail/",
-]
+# atbcal.com rebuilt as a map app in 2026. The old category pages no longer
+# carry listing links; every listing lives in a JSON blob the map reads, which
+# is embedded in the /listings page as `var atbcalData = {...}`.
+ATB_INDEX = "https://atbcal.com/listings"
+
+
+def _atb_detail(url: str) -> Dict:
+    """Pull revenue, SDE and the overview copy from one ATB listing page."""
+    out = {"revenue": None, "cash_flow": None, "description": None}
+    page = fetch(url)
+    if not page:
+        return out
+    m = re.search(r"<main\b[^>]*>(.*?)</main>", page, re.S | re.I)
+    body = m.group(1) if m else page
+    body = re.sub(r"(?is)<(script|style|nav|header|footer|form)[^>]*>.*?</\1>", " ", body)
+    txt = html.unescape(re.sub(r"<[^>]+>", " ", body))
+    txt = re.sub(r"\s+", " ", txt).strip()
+
+    m = re.search(r"Overview\s+(.{120,4000})", txt)
+    if m:
+        out["description"] = m.group(1).strip()[:4000]
+    elif len(txt) > 200:
+        out["description"] = txt[:4000]
+
+    m = (re.search(r"(?:gross(?:\s+revenue)?|revenue(?:\s+was)?(?:\s+approximately)?)\D{0,15}\$([\d,]{5,})", txt, re.I)
+         or re.search(r"\$([\d,]{5,})\s+(?:in\s+)?(?:gross\s+)?revenue", txt, re.I))
+    if m:
+        out["revenue"] = int(m.group(1).replace(",", ""))
+    m = re.search(r"\bSDE\b\D{0,15}\$([\d,]{5,})", txt, re.I)
+    if m:
+        out["cash_flow"] = int(m.group(1).replace(",", ""))
+    return out
+
 
 def scrape_atb() -> List[Dict]:
-    urls = set()
-    for idx in ATB_INDEXES:
-        page = fetch(idx)
-        if not page:
-            continue
-        for u in re.findall(r'href="(https?://(?:www\.)?atbcal\.com/[^"#?]+)"', page):
-            path = re.sub(r"https?://(www\.)?atbcal\.com", "", u).strip("/")
-            # listings sit at the root as city-code, e.g. folsom-fol226
-            if re.fullmatch(r"[a-z0-9-]+-[a-z]{2,5}\d{2,5}", path):
-                urls.add(u)
-    out = []
-    for url in sorted(urls):
-        page = fetch(url)
-        if not page:
-            continue
-        text = strip_tags(page)
-        title = re.search(r"<title>([^<]*)", page)
-        title = title.group(1).split("|")[0].split(" - ATB")[0] if title else ""
-        tl = title.lower()
-        head = text[:600].lower()
-        status = ("sold" if re.search(r"\bsold\b", tl) else
-                  "pending" if re.search(r"pending|under contract|in escrow", tl)
-                  else "active")
-        rev = None
-        m = re.search(r"(?:gross|annual)\s+(?:revenue|receipts|billings)\D{0,12}\$?([\d,]{4,})",
-                      text, re.I)
-        if m:
-            rev = int(m.group(1).replace(",", ""))
-        elif money(text):
-            rev = money(text)
-        ask = re.search(r"asking(?:\s+price)?\D{0,12}\$?([\d,]{4,})", text, re.I)
+    page = fetch(ATB_INDEX)
+    if not page:
+        log.error("atb: could not load %s", ATB_INDEX)
+        return []
+    m = re.search(r"var\s+atbcalData\s*=\s*(\{.*?\});", page, re.S)
+    if not m:
+        log.error("atb: atbcalData block missing, the site template changed again")
+        return []
+    try:
+        data = json.loads(m.group(1))
+    except Exception as e:
+        log.error("atb: could not parse atbcalData: %s", e)
+        return []
 
+    rows = data.get("listings") or []
+    out = []
+    for r in rows:
+        url = (r.get("url") or "").strip()
+        title = (r.get("title") or "").strip()
+        if not url or not title:
+            continue
+        code = None
+        mm = re.search(r"#\s*([A-Za-z]{2,5}\d{2,6})", title)
+        if mm:
+            code = "ATB-" + mm.group(1).upper()
+        city = re.sub(r"#.*$", "", title).strip(" -")
+        state = (r.get("state") or "").upper()[:2] or "CA"
+        status_raw = (r.get("status") or "").lower()
+        status = ("sold" if "sold" in status_raw
+                  else "pending" if ("pending" in status_raw or "escrow" in status_raw or "contract" in status_raw)
+                  else "active")
+        ask = _ds_money(r.get("price") or "")
+        det = _atb_detail(url)
+        firm = (city + " CPA Practice") if city else "CPA Practice"
         out.append(_base(
             "atb", "Accounting and Tax Brokerage", url,
-            firm_type=clean_title(title),
-            state=state_deep(title, text[:1200]) or "CA",
-            revenue=rev,
-            asking_price=int(ask.group(1).replace(",", "")) if ask else None,
-            description=best_description(text),
-            services=services_from(title + " " + text[:600]),
+            firm_type=clean_title(firm),
+            state=state,
+            city=city or None,
+            revenue=det["revenue"],
+            asking_price=ask,
+            cash_flow=det["cash_flow"],
+            description=det["description"],
+            services=services_from(title + " " + (r.get("service") or "") + " " + (det["description"] or "")),
             status=status,
+            listing_code=code,
         ))
     log.info("atb: %s listings", len(out))
     return out
