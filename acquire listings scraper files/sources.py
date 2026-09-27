@@ -187,7 +187,7 @@ def scrape_aba() -> List[Dict]:
             city=(loc.group(1).strip() if loc else None),
             revenue=int(rev.group(1).replace(",", "")) if rev else None,
             asking_price=int(ask.group(1).replace(",", "")) if ask else None,
-            description=(desc or best_description(text)) or None,
+            description=desc or None,
             listing_code=code.group(1) if code else None,
             agent_email=agent,
             services=services_from(title + " " + desc),
@@ -200,6 +200,30 @@ def scrape_aba() -> List[Dict]:
 # ----------------------------------------------------------------------
 # Naab Consulting   plain HTML, status printed on the page
 # ----------------------------------------------------------------------
+
+def _naab_description(page: str) -> Optional[str]:
+    """
+    Naab listing pages are WordPress. The old parser looked for an Overview or
+    Description heading and, when it did not find one, fell back to the whole
+    stripped page, so every listing's description read "Skip to content Toggle
+    Navigation About Sellers Why Naab Consulting..." on the site.
+
+    The real copy lives in <main>. The og:description is a clean broker-written
+    summary and makes a good fallback. Never fall back to the whole page again.
+    """
+    m = re.search(r"<main\b[^>]*>(.*?)</main>", page, re.S | re.I)
+    if m:
+        body = re.sub(r"(?is)<(script|style|nav|header|footer|form)[^>]*>.*?</\1>", " ", m.group(1))
+        txt = html.unescape(re.sub(r"<[^>]+>", " ", body))
+        txt = re.sub(r"\s+", " ", txt).strip()
+        txt = re.sub(r"^Status:\s*\S+\s*", "", txt)     # status is already its own field
+        if len(txt) >= 200:
+            return txt[:4000]
+    og = re.search(r'<meta property="og:description" content="([^"]{40,})"', page)
+    if og:
+        return html.unescape(og.group(1)).strip()
+    return None
+
 
 def scrape_naab() -> List[Dict]:
     # Naab blocks datacenter IPs with a 403 (it answers this Mac fine but not
@@ -231,11 +255,7 @@ def scrape_naab() -> List[Dict]:
         code = slug.upper() if re.match(r"^[a-z]{2}[-]?\d{3,}", slug) else None
         rev = money(text)
 
-        desc = ""
-        m = re.search(r"(?:Overview|Description)(.{200,4000}?)(?:Contact|Inquire|Status)",
-                      text, re.I | re.S)
-        if m:
-            desc = m.group(1).strip()
+        desc = _naab_description(page) or ""
 
         out.append(_base(
             "naab", "Naab Consulting", url,
