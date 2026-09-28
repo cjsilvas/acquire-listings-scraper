@@ -9,6 +9,7 @@ Two speeds, so we find new deals fast without hammering the brokers:
   python main.py deep
 """
 import sys, logging, time
+from datetime import datetime, timezone
 from engine import sync, db, load_detail_checked, flush_detail_checked
 from sources import ALL_SOURCES
 
@@ -18,6 +19,28 @@ log = logging.getLogger("fold.main")
 
 
 STALE_HOURS = 24            # a source with no fresh row in a day has gone dark
+
+# Sources checked once a day instead of every run.
+# Naab is the reason this exists. Its listings are built FROM the detail pages,
+# one proxied fetch per listing, so a full Naab pass costs ~280 fetches. Run six
+# times a day that was 14,096 ScraperAPI credits a day, more than a third of the
+# whole bill, to re-read 280 pages that had not changed. Naab publishes a handful
+# of practices a week, so once a day loses nothing real.
+#
+# Skipping is SAFE because sync() only miss-counts listings whose source is in
+# sources_run. A source that did not run is left completely alone, not retired.
+DAILY_SOURCES = {"naab"}
+DAILY_SOURCE_HOUR_UTC = 8   # 3am Central, a cron tick (cron is 0 */4 * * *)
+DAILY_STALE_HOURS = 30      # a once-a-day source is not late until it misses its slot
+
+
+def _skip_daily_source(name: str, mode: str) -> bool:
+    """True when this source is not due on this run."""
+    if name not in DAILY_SOURCES:
+        return False
+    if mode == "daily":          # an explicit catch-up run does everything
+        return False
+    return datetime.now(timezone.utc).hour != DAILY_SOURCE_HOUR_UTC
 ALERT_COOLDOWN_HOURS = 20   # tell CJ once a day, not once a run
 
 
@@ -75,7 +98,8 @@ def alert_on_stale_sources():
                 log.warning("could not read last_seen for %s: %r", src, rows[0]["last_seen"])
                 continue
             hrs = (now - seen).total_seconds() / 3600.0
-            if hrs >= STALE_HOURS:
+            limit = DAILY_STALE_HOURS if src in DAILY_SOURCES else STALE_HOURS
+            if hrs >= limit:
                 stale.append((src, int(hrs)))
         except Exception as e:
             log.warning("staleness check failed for %s: %s", src, e)
@@ -140,8 +164,12 @@ def run(mode: str = "deep"):
     except Exception as e:
         log.warning("could not load detail history, this run may re-read pages: %s", e)
 
-    scraped, ran = [], []
+    scraped, ran, skipped = [], [], []
     for name, fn in ALL_SOURCES.items():
+        if _skip_daily_source(name, mode):
+            skipped.append(name)
+            log.info("%s: not due, checked once a day at %02d:00 UTC", name, DAILY_SOURCE_HOUR_UTC)
+            continue
         try:
             items = fn(deep=(mode=="deep")) if "deep" in fn.__code__.co_varnames else fn()
             scraped.extend(items)
@@ -149,7 +177,8 @@ def run(mode: str = "deep"):
         except Exception as e:
             log.exception("source %s failed, skipping it: %s", name, e)
 
-    failed = [n for n in ALL_SOURCES if n not in ran]
+    # A source we deliberately did not run is not a failure.
+    failed = [n for n in ALL_SOURCES if n not in ran and n not in skipped]
     # A source that raised no error but produced nothing is failed, not collapsed.
     # This keeps a chronically blocked source from tripping the quality gate.
     empty = [n for n in ran if not any(i.get("source") == n for i in scraped)]
