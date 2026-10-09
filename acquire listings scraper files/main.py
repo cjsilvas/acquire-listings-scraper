@@ -179,9 +179,19 @@ def run(mode: str = "deep"):
 
     # A source we deliberately did not run is not a failure.
     failed = [n for n in ALL_SOURCES if n not in ran and n not in skipped]
+    # A few scrapers deliberately tag their rows with a DIFFERENT source name
+    # than the key they are registered under. bizbuysell_keywords is a sweep for
+    # practices mis-filed outside the Accounting category, and its finds belong
+    # to "bizbuysell" so dedupe can collapse them against the main category.
+    # Checking for rows tagged with the KEY therefore reported it failed on every
+    # single run, 116 times between 2026-09-18 and 2026-10-09, while it was
+    # working correctly. Map the key to the tag it actually writes.
+    WRITES_AS = {"bizbuysell_keywords": "bizbuysell"}
+
     # A source that raised no error but produced nothing is failed, not collapsed.
     # This keeps a chronically blocked source from tripping the quality gate.
-    empty = [n for n in ran if not any(i.get("source") == n for i in scraped)]
+    empty = [n for n in ran
+             if not any(i.get("source") == WRITES_AS.get(n, n) for i in scraped)]
     if empty:
         log.error("sources that returned nothing this run: %s", empty)
         failed = failed + empty

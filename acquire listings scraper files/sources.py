@@ -759,30 +759,57 @@ def scrape_prohorizons() -> List[Dict]:
 # ----------------------------------------------------------------------
 
 def scrape_padgett() -> List[Dict]:
+    """
+    Parse the index page only. Every detail page sits behind an AWS WAF
+    JavaScript challenge that returns HTTP 202 with an EMPTY body (confirmed
+    2026-10-09 direct, and through ScraperAPI standard, premium, ultra and
+    render, all of which get the challenge shell, not the page). fetch() only
+    accepts 200, so it gave up on all 7 and the source returned zero from
+    2026-10-06 onward.
+
+    No detail fetch is needed: the index card already carries the title, the
+    full description and "Annual Revenue : $640K". Do NOT reintroduce a
+    per-listing fetch unless the WAF comes off; it cannot succeed.
+    """
     idx = fetch("https://www.padgettadvisors.com/join/firms-for-sale/")
     if not idx:
         return []
-    urls = sorted(set(re.findall(
-        r'href="(https://www\.padgettadvisors\.com/blog/portfolio/[^"#?]+)"', idx)))
+
+    cards = idx.split('<div class="tlp-portfolio-item">')[1:]
     out = []
-    for url in urls:
-        page = fetch(url)
-        if not page:
+    for card in cards:
+        m = re.search(
+            r'href="(https://www\.padgettadvisors\.com/blog/portfolio/[^"#?]+)"', card)
+        if not m:
             continue
-        text = strip_tags(page)
-        title = re.search(r"<title>([^<]*)", page)
-        title = title.group(1).split("|")[0].split(" - Padgett")[0] if title else ""
-        m = re.search(r"Annual Revenue:?\s*\$([\d,]+)", text)
-        rev = int(m.group(1).replace(",", "")) if m else None
-        desc = None
-        m = re.search(r"Firm Description:\s*(.{200,4000}?)(?:Inquire|Contact|Interested|Find an office|$)",
-                      text, re.S)
+        url = m.group(1)
+
+        m = re.search(r"<h3[^>]*>\s*(?:<a[^>]*>)?\s*([^<]+)", card)
+        title = html.unescape(m.group(1)).strip() if m else ""
+
+        text = re.sub(r"\s+", " ", strip_tags(card))
+
+        # "Annual Revenue : $640K" / "$1.2M" / "$640,000"
+        rev = None
+        m = re.search(r"Annual Revenue\s*:?\s*\$\s*([\d,.]+)\s*([KMkm])?", text)
         if m:
-            desc = m.group(1).strip()
-        low = text[:3000].lower()
-        status = ("sold" if re.search(r"\bsold\b", title.lower()) or "no longer available" in low
+            try:
+                n = float(m.group(1).replace(",", ""))
+                suf = (m.group(2) or "").upper()
+                rev = int(n * (1_000 if suf == "K" else 1_000_000 if suf == "M" else 1))
+            except ValueError:
+                rev = None
+
+        desc = None
+        m = re.search(r"(.{150,1500}?)\s*Annual Revenue", text)
+        if m:
+            desc = html.unescape(m.group(1)).strip()
+
+        low = (title + " " + text[:1500]).lower()
+        status = ("sold" if re.search(r"\bsold\b", low) or "no longer available" in low
                   else "pending" if re.search(r"sale pending|under contract", low)
                   else "active")
+
         out.append(_base(
             "padgett", "Padgett Advisors", url,
             firm_type=clean_title(title),
