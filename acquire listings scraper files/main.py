@@ -72,7 +72,7 @@ def _setting(key: str):
         return None
 
 
-def alert_on_stale_sources():
+def alert_on_stale_sources(discarded=None):
     """
     Email CJ when a source stops producing fresh listings.
 
@@ -118,8 +118,20 @@ def alert_on_stale_sources():
     if not key or key == "PASTE_KEY_HERE":
         return stale
 
+    # A source that went stale because this run DISCARDED it is a different
+    # problem from a source that errored, and it needs saying out loud: the
+    # scrape worked, the live count just fell far enough to trip the collapse
+    # guard, so either the broker really sold through or the parser is reading
+    # less than it should.
+    dropped = set(discarded or [])
     items = "".join(
-        "<li><b>%s</b>: %s</li>" % (src, "never seen" if hrs is None else "%s hours since a fresh listing" % hrs)
+        "<li><b>%s</b>: %s%s</li>" % (
+            src,
+            "never seen" if hrs is None else "%s hours since a fresh listing" % hrs,
+            (" &mdash; this run scraped it but threw the result away, because its "
+             "live count fell more than half. Either that broker sold most of its "
+             "book, or the parser is now reading fewer listings than are really "
+             "there.") if src in dropped else "")
         for src, hrs in stale)
     html_body = (
         "<p>These listing sources have gone quiet. Their listings still show on the site, "
@@ -254,12 +266,20 @@ def run(mode: str = "deep"):
         checks["live_count_sane"] = 250 <= live <= 4000
         checks["work_happened"] = (stats.get("new", 0) + stats.get("updated", 0)) > 0
         gate_ok = all(checks.values())
+        # engine.sync() throws away any source whose live count collapsed, to
+        # stop a broken parser retiring a whole broker. That discard used to be
+        # written ONLY to the Railway log, which a cron run throws away. So
+        # sync_health said "17 ok, 0 failed, every check passed" while pas was
+        # being discarded on every run, its last_seen froze, and the only hint
+        # was a "went dark" email a day later with no cause in it. Record it.
+        discarded = stats.get("skipped_sources") or []
         db.table("sync_health").insert({
             "ok": gate_ok,
             "sources_ok": len(ran),
             "sources_failed": len(failed),
             "live_count": live,
-            "details": {"checks": checks, "failed_sources": failed},
+            "details": {"checks": checks, "failed_sources": failed,
+                        "discarded_sources": discarded},
         }).execute()
         if not gate_ok:
             log.error("QUALITY GATE FAILED: %s", checks)
@@ -267,7 +287,8 @@ def run(mode: str = "deep"):
         log.exception("could not record sync health: %s", e)
 
     try:
-        stats["stale_sources"] = alert_on_stale_sources()
+        stats["stale_sources"] = alert_on_stale_sources(
+            discarded=stats.get("skipped_sources") or [])
     except Exception as e:
         log.warning("stale source check failed: %s", e)
 

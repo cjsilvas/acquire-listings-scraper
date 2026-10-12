@@ -1773,20 +1773,38 @@ _PAS_REGIONS = {
     "northwest-practices": None,
 }
 
-_PAS_LIVE = re.compile(
-    r'(Proposals Pending|Now Available|Available|Sale Pending|Under Contract|Pending)',
-    re.I)
+# Every status PAS uses that means "still for sale". Checked against the live
+# site on 2026-10-11: the sold rows read SOLD or "S O L D", and "On Hold" means
+# withdrawn, so none of those belong here. "Recently Listed" and
+# "Closing <Month>" were added that day after they cost us real listings: the
+# Atlanta table had two Recently Listed practices the parser could not see.
+_PAS_LIVE_ALT = (r'Proposals Pending|Now Available|Recently Listed|Available'
+                 r'|Sale Pending|Under Contract|Closing [A-Z][a-z]+|Pending')
+_PAS_LIVE = re.compile(r'(' + _PAS_LIVE_ALT + r')', re.I)
 
 
 def scrape_pas() -> List[Dict]:
     import time as _time
     out, seen = [], set()
     for region, region_state in _PAS_REGIONS.items():
-        page = fetch_via_api(f"https://www.cpasales.com/{region}", render=True)
-        if not page:
-            continue
-        m = re.search(r'"(https://wix-visual-data\.appspot\.com/index\?[^"]+)"', page)
+        # The listing table is a Wix "Table Master" widget. Its data URL only
+        # exists once the page has rendered, and the render comes back without
+        # it often enough to matter: on 2026-10-11, three of these twelve
+        # regions needed a second or third attempt. With no retry those regions
+        # quietly contributed nothing, the source reported 2 live listings
+        # instead of 7, tripped engine.py's collapse guard, and was thrown away
+        # on five runs in a row while CJ got a "went dark" email about it.
+        m = None
+        for attempt in range(3):
+            page = fetch_via_api(f"https://www.cpasales.com/{region}", render=True)
+            if page:
+                m = re.search(
+                    r'"(https://wix-visual-data\.appspot\.com/index\?[^"]+)"', page)
+                if m:
+                    break
+            _time.sleep(2)
         if not m:
+            log.warning("pas %s: no data table after 3 renders, skipping region", region)
             continue
         data_url = html.unescape(m.group(1))
         data = fetch_via_api(data_url)
@@ -1796,16 +1814,22 @@ def scrape_pas() -> List[Dict]:
         # Only the portion before "RECENT SALES" is live inventory.
         head = data.split("RECENT SALES")[0]
 
+        before_region = len(out)
         for pm in re.finditer(
-                r'(Proposals Pending|Now Available|Available|Sale Pending|Under Contract|Pending)'
+                r'(' + _PAS_LIVE_ALT + r')'
                 r',\\*"?\$([\d,]{4,})', head, re.I):
             status_txt = pm.group(1).lower()
             price = int(pm.group(2).replace(",", ""))
 
-            # Nearest preceding PageLink text is the location label.
+            # Nearest preceding PageLink text is the location label. The cell
+            # is a JSON blob inside a CSV string inside JSON, so the quotes
+            # arrive doubled AND backslash escaped: \"\"text\"\":\"\"Indianapolis\"\".
+            # The old pattern assumed a single layer, matched nothing, and every
+            # PAS listing since 2026-08-18 was filed with no city at all. Accept
+            # any run of quotes and backslashes so either depth works.
             before = head[:pm.start()]
             loc = None
-            for tm in re.finditer(r'"text\\+":\\+"([^\\"]{2,50})', before):
+            for tm in re.finditer(r'text[\\"]+:[\\"]+([^\\"]{2,60})', before):
                 loc = tm.group(1)
             loc = (loc or "").strip() or None
 
@@ -1816,7 +1840,8 @@ def scrape_pas() -> List[Dict]:
             seen.add(key)
 
             status = "pending" if ("pending" in status_txt or "proposal" in status_txt
-                                   or "offer" in status_txt or "contract" in status_txt) else "active"
+                                   or "offer" in status_txt or "contract" in status_txt
+                                   or "closing" in status_txt) else "active"
             state = region_state or (_bbs_state(loc) if loc else None)
 
             out.append(_base(
@@ -1833,6 +1858,7 @@ def scrape_pas() -> List[Dict]:
                 seller_note="Listed via Professional Accounting Sales (specialist CPA broker)",
                 listing_code="PAS-" + region.replace("practices-", "").replace("-practices", "").upper()[:6] + "-" + str(price)[:4],
             ))
+        log.info("pas %s: %s live listings", region, len(out) - before_region)
         _time.sleep(1)
     log.info("pas: %s live listings", len(out))
     return out
